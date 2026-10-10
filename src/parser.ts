@@ -51,6 +51,7 @@ import {
   computeWordParts,
   computeEmbeddedWordParts,
   computeHereDocBodyParts,
+  computeBareWordParts,
   wordPartsResolver,
   embeddedPartsResolver,
 } from "./parts.ts";
@@ -1639,7 +1640,7 @@ class Parser {
       tok.pos,
       tok.end,
       source,
-      source === undefined ? undefined : wordPartsResolver(this.tok.getSubstitutionContext()),
+      source === undefined ? computeBareWordParts : wordPartsResolver(this.tok.getSubstitutionContext()),
       this.depth,
     );
   }

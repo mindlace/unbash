@@ -3,6 +3,10 @@ import { hasEmbeddedWordStructure, Lexer, MAX_SYNTAX_NESTING } from "./lexer.ts"
 import { parseRegion } from "./parser.ts";
 import type { PartsResolver } from "./word.ts";
 import type { SubstitutionContext } from "./substitution-context.ts";
+import { hasGlobCharacters, parseGlobParts } from "./glob.ts";
+
+export const computeBareWordParts: PartsResolver = (_source, word) =>
+  hasGlobCharacters(word.text) ? parseGlobParts(word.text, 0, word.text.length, undefined, word.pos) : undefined;
 
 export function wordPartsResolver(context: SubstitutionContext | undefined): PartsResolver | undefined {
   if (context === undefined) return undefined;

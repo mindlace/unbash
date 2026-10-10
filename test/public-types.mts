@@ -5,6 +5,7 @@ import {
   type ArithmeticWord,
   type Assignment,
   type BraceExpansionPart,
+  type BracketGlobPart,
   type Command,
   type CommandArgument,
   type CommandNode,
@@ -12,16 +13,20 @@ import {
   type Coproc,
   type ExtendedGlobPart,
   type Function,
+  type GlobPart,
   type HereDoc,
   type ParameterOperation,
   type ParsedScript,
   type Pipeline,
   type PipelineNode,
+  type QuestionGlobPart,
   type Redirection,
   type Statement,
+  type StarGlobPart,
   type SyntaxNode,
   type Time,
   type Word,
+  type WordPart,
 } from "unbash";
 import { print } from "unbash/printer";
 
@@ -57,6 +62,32 @@ if (script.errors?.[0]) {
   // @ts-expect-error error records are readonly
   script.errors[0].message = "error";
 }
+
+declare const glob: GlobPart;
+const globValue: string = glob.value;
+void globValue;
+// @ts-expect-error glob values are readonly
+glob.value = "changed";
+if (glob.kind === "bracket") {
+  const bracket: BracketGlobPart = glob;
+  const interior: readonly WordPart[] = bracket.parts;
+  void interior;
+  // @ts-expect-error bracket interiors are readonly collections
+  glob.parts.pop();
+} else if (glob.kind === "star") {
+  const star: StarGlobPart = glob;
+  const noChildren: undefined = star.parts;
+  void noChildren;
+} else {
+  const question: QuestionGlobPart = glob;
+  const noChildren: undefined = question.parts;
+  void noChildren;
+}
+// @ts-expect-error brackets always own their interior parts
+const incompleteBracket: BracketGlobPart = { type: "Glob", kind: "bracket", pos: 0, end: 3, text: "[a]", value: "[a]" };
+// @ts-expect-error wildcard leaves cannot own children
+const compositeStar: StarGlobPart = { type: "Glob", kind: "star", pos: 0, end: 1, text: "*", value: "*", parts: [] };
+void [incompleteBracket, compositeStar];
 
 declare const word: Word;
 if ("parts" in word) {
@@ -192,6 +223,7 @@ type ExpectedSyntaxKind =
   | "ArithmeticCommand"
   | "Word"
   | "Literal"
+  | "Glob"
   | "SingleQuoted"
   | "DoubleQuoted"
   | "AnsiCQuoted"
@@ -236,6 +268,7 @@ type AssertTrue<T extends true> = T;
 type Equals<A, B> = (<T>() => T extends A ? 1 : 2) extends <T>() => T extends B ? 1 : 2 ? true : false;
 type PresentUndefinedFields = [
   AssertTrue<undefined extends Required<Word>["parts"] ? true : false>,
+  AssertTrue<undefined extends Required<GlobPart>["parts"] ? true : false>,
   AssertTrue<undefined extends Required<ExtendedGlobPart>["parts"] ? true : false>,
   AssertTrue<undefined extends Required<BraceExpansionPart>["parts"] ? true : false>,
   AssertTrue<undefined extends Required<ArithmeticWord>["parts"] ? true : false>,
@@ -255,7 +288,10 @@ type IsUnion<T, Whole = T> = T extends Whole ? ([Whole] extends [T] ? false : tr
 type DuplicateTags = {
   [K in SyntaxNode["type"]]: IsUnion<Extract<SyntaxNode, { type: K }>> extends true ? K : never;
 }[SyntaxNode["type"]];
-type UniqueSyntax = AssertNever<DuplicateTags>;
+type UniqueSyntax = AssertNever<Exclude<DuplicateTags, "Glob">>;
+type GlobKinds = AssertTrue<Equals<GlobPart["kind"], "star" | "question" | "bracket">>;
+declare const globKinds: GlobKinds;
+void globKinds;
 declare const allKinds: [MissingSyntax, ExtraSyntax, UniqueSyntax];
 void allKinds;
 

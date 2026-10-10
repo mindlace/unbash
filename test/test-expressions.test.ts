@@ -547,7 +547,8 @@ fi
 `,
       [21, 41],
       [
-        ["Literal", "*.", "*."],
+        ["Glob", "*"],
+        ["Literal", ".", "."],
         ["ExtendedGlob", "@(md|mkd|markdown)", "@", "md|mkd|markdown"],
       ],
     ],
@@ -555,7 +556,8 @@ fi
       '[[ "a.md" == ?.@(md|mkd) ]]',
       [13, 24],
       [
-        ["Literal", "?.", "?."],
+        ["Glob", "?"],
+        ["Literal", ".", "."],
         ["ExtendedGlob", "@(md|mkd)", "@", "md|mkd"],
       ],
     ],
@@ -599,9 +601,9 @@ fi
       47,
       ['*"AB"*', "*AB*", 17, 23],
       [
-        ["Literal", "*", "*"],
+        ["Glob", "*"],
         ["DoubleQuoted", '"AB"', [["Literal", "AB", "AB"]]],
-        ["Literal", "*", "*"],
+        ["Glob", "*"],
       ],
     ],
     [
@@ -612,9 +614,9 @@ fi
       48,
       ['*"A B"*', "*A B*", 17, 24],
       [
-        ["Literal", "*", "*"],
+        ["Glob", "*"],
         ["DoubleQuoted", '"A B"', [["Literal", "A B", "A B"]]],
-        ["Literal", "*", "*"],
+        ["Glob", "*"],
       ],
     ],
   ] as const) {

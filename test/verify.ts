@@ -196,6 +196,14 @@ function verifyPartChildren(source: string, part: WordPart | DoubleQuotedChild) 
     }
   }
 
+  if ((part.type === "Glob" || part.type === "BraceExpansion" || part.type === "ExtendedGlob") && part.parts) {
+    const prefix = part.type === "ExtendedGlob" ? part.text.indexOf("(") + 1 : 1;
+    const inner = part.text.slice(prefix, -1);
+    const childText = part.parts.map((child) => child.text).join("");
+    if (childText !== inner) fail(part, "parts", inner, childText);
+    for (const child of part.parts) verifyPartChildren(source, child);
+  }
+
   if ((part.type === "CommandExpansion" || part.type === "ProcessSubstitution") && part.script) {
     // Nested script spans are absolute in the original source, so the inner
     // command text slices straight out of it.

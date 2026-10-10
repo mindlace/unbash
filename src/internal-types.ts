@@ -4,6 +4,10 @@ type Mutable<T> = { -readonly [K in keyof T]: Mutable<T[K]> };
 
 export type Word = Mutable<Public.Word>;
 export type LiteralPart = Mutable<Public.LiteralPart>;
+export type GlobPart = Mutable<Public.GlobPart>;
+export type StarGlobPart = Mutable<Public.StarGlobPart>;
+export type QuestionGlobPart = Mutable<Public.QuestionGlobPart>;
+export type BracketGlobPart = Mutable<Public.BracketGlobPart>;
 export type SingleQuotedPart = Mutable<Public.SingleQuotedPart>;
 export type DoubleQuotedPart = Mutable<Public.DoubleQuotedPart>;
 export type AnsiCQuotedPart = Mutable<Public.AnsiCQuotedPart>;

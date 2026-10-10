@@ -15,6 +15,31 @@ export interface LiteralPart {
   readonly text: string;
 }
 
+interface GlobPartBase {
+  readonly type: "Glob";
+  readonly pos: number;
+  readonly end: number;
+  readonly text: string;
+  readonly value: string;
+}
+
+export interface StarGlobPart extends GlobPartBase {
+  readonly kind: "star";
+  readonly parts?: undefined;
+}
+
+export interface QuestionGlobPart extends GlobPartBase {
+  readonly kind: "question";
+  readonly parts?: undefined;
+}
+
+export interface BracketGlobPart extends GlobPartBase {
+  readonly kind: "bracket";
+  readonly parts: readonly WordPart[];
+}
+
+export type GlobPart = StarGlobPart | QuestionGlobPart | BracketGlobPart;
+
 export interface SingleQuotedPart {
   readonly type: "SingleQuoted";
   readonly pos: number;
@@ -243,6 +268,7 @@ export type DoubleQuotedChild =
 
 export type WordPart =
   | LiteralPart
+  | GlobPart
   | SingleQuotedPart
   | DoubleQuotedPart
   | AnsiCQuotedPart

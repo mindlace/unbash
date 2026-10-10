@@ -1,5 +1,5 @@
 import { Lexer, LexContext, skipLineContinuations, Token } from "./lexer.ts";
-import { arrayPartsResolver, embeddedPartsResolver, wordPartsResolver } from "./parts.ts";
+import { arrayPartsResolver, computeBareWordParts, embeddedPartsResolver, wordPartsResolver } from "./parts.ts";
 import type { ArrayValue, Assignment, Word } from "./internal-types.ts";
 import { WordImpl } from "./word.ts";
 import type { SubstitutionContext } from "./substitution-context.ts";
@@ -34,7 +34,11 @@ class ArrayValueImpl implements ArrayValue {
       const context = lexer.getSubstitutionContext();
       const source = !indexed && token.raw && token.keywordEligible ? undefined : this.#source;
       const resolver =
-        source === undefined ? undefined : indexed ? arrayPartsResolver(context) : wordPartsResolver(context);
+        source === undefined
+          ? computeBareWordParts
+          : indexed
+            ? arrayPartsResolver(context)
+            : wordPartsResolver(context);
       elements.push(new WordImpl(text, token.pos, token.end, source, resolver, this.#depth));
     }
     this.#elements = elements;

@@ -461,7 +461,7 @@ test("a quoted expansion remains inside a quoted suffix pattern (#254)", () => {
       text: '"$2"',
       parts: [{ type: "SimpleExpansion", pos: 11, end: 13, text: "$2" }],
     },
-    { type: "Literal", pos: 14, end: 15, value: "*", text: "*" },
+    { type: "Glob", kind: "star", pos: 14, end: 15, text: "*", value: "*", parts: undefined },
   ]);
 });
 

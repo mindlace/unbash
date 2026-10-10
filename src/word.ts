@@ -1,39 +1,7 @@
-import type { DoubleQuotedChild, Word, WordPart } from "./internal-types.ts";
+import type { Word, WordPart } from "./internal-types.ts";
+import { unescapeBareValue, wordPartsValue } from "./word-value.ts";
 
 export type PartsResolver = (source: string, word: Word, depth: number) => WordPart[] | undefined;
-
-function dequoteValue(parts: DoubleQuotedChild[]): string {
-  let s = "";
-  for (const c of parts) s += c.type === "Literal" ? c.value : c.text;
-  return s;
-}
-
-function unescapeBareValue(text: string): string {
-  const first = text.indexOf("\\");
-  if (first === -1) return text;
-
-  let s = "";
-  let start = 0;
-  for (let i = first; i < text.length; i++) {
-    if (text.charCodeAt(i) !== 92) continue;
-    s += text.slice(start, i);
-    i++;
-    if (i >= text.length) {
-      s += "\\";
-      start = i;
-      break;
-    }
-    if (text.charCodeAt(i) !== 10) s += text[i];
-    start = i + 1;
-  }
-  return s + text.slice(start);
-}
-
-function continuedExpansionValue(text: string): string {
-  let pos = 1;
-  while (text[pos] === "\\" && text[pos + 1] === "\n") pos += 2;
-  return pos === 1 || text[pos] !== "(" ? text : text[0] + text.slice(pos);
-}
 
 export class WordImpl implements Word {
   static _resolveWord: PartsResolver;
@@ -55,40 +23,13 @@ export class WordImpl implements Word {
     this.#source = source;
     this.#resolver = resolver ?? WordImpl._resolveWord;
     this.#depth = depth;
-    this.#parts = source !== undefined ? null : undefined;
+    this.#parts = source !== undefined || resolver !== undefined ? null : undefined;
   }
 
   get value(): string {
     if (this.#value === null) {
-      const parts = this.parts;
-      if (!parts) {
-        this.#value = unescapeBareValue(this.text);
-      } else {
-        let s = "";
-        for (const p of parts) {
-          switch (p.type) {
-            case "Literal":
-            case "SingleQuoted":
-            case "AnsiCQuoted":
-              s += p.value;
-              break;
-            case "DoubleQuoted":
-            case "LocaleString":
-              s += dequoteValue(p.parts);
-              break;
-            case "CommandExpansion":
-              s += p.text[0] === "$" ? continuedExpansionValue(p.text) : p.text;
-              break;
-            case "ExtendedGlob":
-              s += continuedExpansionValue(p.text);
-              break;
-            default:
-              s += p.text;
-              break;
-          }
-        }
-        this.#value = s;
-      }
+      const parts = this.#source === undefined && this.#parts === null ? undefined : this.parts;
+      this.#value = parts ? wordPartsValue(parts) : unescapeBareValue(this.text);
     }
     return this.#value;
   }

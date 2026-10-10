@@ -63,7 +63,11 @@ test("function names ending in extglob operators follow default Bash", () => {
       const fn = nodeOfType(ast.commands[0].command, "Function");
       assert.equal(fn.name.value, name, source);
       assert.equal(fn.name.parts?.some((part) => part.type === "ExtendedGlob") ?? false, false, source);
-      assert.equal(computeWordParts(source, fn.name), undefined, source);
+      assert.equal(
+        computeWordParts(source, fn.name)?.some((part) => part.type === "ExtendedGlob") ?? false,
+        false,
+        source,
+      );
       const body = nodeOfType(fn.body, "BraceGroup");
       assert.equal(nodeOfType(body.body.commands[0].command, "Command").name?.text, "echo", source);
     }
@@ -266,7 +270,9 @@ test("pathname-prefixed extglob stays inside nested rm command (#313; Bash -O ex
   const path = nodeOfType(rm.suffix[1], "Word");
   assert.deepEqual([path.text, path.pos, path.end], ["/etc/php/*/fpm/pool.d/!(*.conf|*.orig|*.dpkg-dist)", 68, 118]);
   assert.deepEqual(wp(source, path), [
-    { type: "Literal", pos: 68, end: 90, value: "/etc/php/*/fpm/pool.d/", text: "/etc/php/*/fpm/pool.d/" },
+    { type: "Literal", pos: 68, end: 77, value: "/etc/php/", text: "/etc/php/" },
+    { type: "Glob", kind: "star", pos: 77, end: 78, text: "*", value: "*", parts: undefined },
+    { type: "Literal", pos: 78, end: 90, value: "/fpm/pool.d/", text: "/fpm/pool.d/" },
     {
       type: "ExtendedGlob",
       pos: 90,
@@ -274,7 +280,14 @@ test("pathname-prefixed extglob stays inside nested rm command (#313; Bash -O ex
       text: "!(*.conf|*.orig|*.dpkg-dist)",
       operator: "!",
       pattern: "*.conf|*.orig|*.dpkg-dist",
-      parts: undefined,
+      parts: [
+        { type: "Glob", kind: "star", pos: 92, end: 93, text: "*", value: "*", parts: undefined },
+        { type: "Literal", pos: 93, end: 99, text: ".conf|", value: ".conf|" },
+        { type: "Glob", kind: "star", pos: 99, end: 100, text: "*", value: "*", parts: undefined },
+        { type: "Literal", pos: 100, end: 106, text: ".orig|", value: ".orig|" },
+        { type: "Glob", kind: "star", pos: 106, end: 107, text: "*", value: "*", parts: undefined },
+        { type: "Literal", pos: 107, end: 117, text: ".dpkg-dist", value: ".dpkg-dist" },
+      ],
     },
   ]);
 });

@@ -15,7 +15,9 @@ import { decodeAnsiCQuoted } from "./ansi-c.ts";
 import { parseArithmeticExpression } from "./arithmetic.ts";
 import { WordImpl } from "./word.ts";
 import type { SubstitutionContext } from "./substitution-context.ts";
+import { hasGlobCharacters, parseGlobParts } from "./glob.ts";
 import {
+  skipLineContinuations,
   CH_TAB,
   CH_NL,
   CH_SPACE,
@@ -56,6 +58,10 @@ import {
   CH_PIPE,
   CH_RBRACE,
 } from "./chars.ts";
+
+export { skipLineContinuations } from "./chars.ts";
+
+type SubFieldContext = "word" | "quoted" | "embedded";
 
 // Shared nesting budget for compound syntax and for structure materialized on demand
 // (sub-field words, nested substitution scripts). 256 nested levels stay lossless; past
@@ -226,11 +232,6 @@ charType[CH_DQUOTE] = 2;
 charType[CH_DOLLAR] = 2;
 charType[CH_BACKTICK] = 2;
 charType[CH_LBRACE] = 2;
-
-export function skipLineContinuations(source: string, pos: number, end: number): number {
-  while (pos + 1 < end && source.charCodeAt(pos) === CH_BACKSLASH && source.charCodeAt(pos + 1) === CH_NL) pos += 2;
-  return pos;
-}
 
 function skipBlanks(source: string, pos: number, end: number): number {
   while (pos < end) {
@@ -1249,7 +1250,7 @@ export class Lexer {
     if (close === -1) return this.buildWordParts(startPos);
     this._buildParts = true;
     const prefix = hasEmbeddedWordStructure(this.src, startPos, close + 1)
-      ? this.parseSubFieldWord(startPos, close + 1)
+      ? this.parseSubFieldWord(startPos, close + 1, "embedded")
       : undefined;
     this.pos = close + 1;
     this.readWordText();
@@ -1272,7 +1273,7 @@ export class Lexer {
       const text = this.src.slice(startPos, close + 1);
       parts.unshift({ type: "Literal", pos: startPos, end: close + 1, text, value: prefix?.value ?? text });
     }
-    return parts;
+    return parts ?? null;
   }
 
   /** Scan a heredoc body for expansions, building parts. Spaces/newlines are literal. */
@@ -2245,7 +2246,11 @@ export class Lexer {
       this._wordKeywordEligible = true;
       this._wordIsAssignment = undefined;
       this._wordAssignmentOperatorPos = undefined;
-      if (this._buildParts) this._wordParts = null;
+      if (this._buildParts) {
+        this._wordParts = hasGlobCharacters(this._wordText)
+          ? (parseGlobParts(src, fastStart, pos, undefined) ?? null)
+          : null;
+      }
       return;
     }
 
@@ -2265,10 +2270,12 @@ export class Lexer {
     let parts: WordPart[] | undefined;
     let litBuf = "";
     let litStart = 0;
+    let hasGlobs = false;
     if (bp) {
       parts = [];
       litBuf = text; // fast-path prefix is literal
       litStart = fastStart;
+      hasGlobs = text.length > 0 && hasGlobCharacters(text);
     }
 
     while (pos < len) {
@@ -2287,7 +2294,10 @@ export class Lexer {
         if (bt) {
           const chunk = src.slice(runStart, pos);
           text += chunk;
-          if (bp) litBuf += chunk;
+          if (bp) {
+            litBuf += chunk;
+            hasGlobs = hasGlobs || hasGlobCharacters(chunk);
+          }
         }
         continue;
       }
@@ -2364,13 +2374,12 @@ export class Lexer {
                 text: src.slice(prefixPos, pos),
                 operator: op,
                 pattern: src.slice(innerStart, patternEnd),
-                parts: hasEmbeddedWordStructure(src, innerStart, patternEnd)
-                  ? this.parseSubFieldWord(innerStart, patternEnd).parts
-                  : undefined,
+                parts: this.subFieldParts(innerStart, patternEnd),
               });
               litStart = pos;
             } else if (bp) {
               litBuf += eg;
+              hasGlobs = hasGlobs || hasGlobCharacters(eg);
             }
           }
           continue;
@@ -2384,7 +2393,10 @@ export class Lexer {
             if (bt) {
               const chunk = src.slice(pos, spanEnd);
               text += chunk;
-              if (bp) litBuf += chunk;
+              if (bp) {
+                litBuf += chunk;
+                hasGlobs = hasGlobs || hasGlobCharacters(chunk);
+              }
             }
             pos = spanEnd;
             continue;
@@ -2586,9 +2598,7 @@ export class Lexer {
                 pos,
                 end: braceEnd,
                 text: braceText,
-                parts: hasEmbeddedWordStructure(src, pos + 1, braceEnd - 1)
-                  ? this.parseSubFieldWord(pos + 1, braceEnd - 1).parts
-                  : undefined,
+                parts: this.subFieldParts(pos + 1, braceEnd - 1),
               });
               litStart = braceEnd;
             }
@@ -2622,20 +2632,23 @@ export class Lexer {
     if (bp) {
       // Only store parts if they add structure beyond a single literal
       this._wordParts = parts!.length > 1 || (parts!.length === 1 && parts![0].type !== "Literal") ? parts! : null;
+      if (hasGlobs) this._wordParts = parseGlobParts(src, fastStart, pos, this._wordParts) ?? null;
     }
   }
 
   // Arithmetic text gets expansions and quote removal but no process substitution.
-  private readInnerWordText(insideDoubleQuotes = false, arithmetic = false): void {
+  private readInnerWordText(insideDoubleQuotes = false, arithmetic = false, globs = false): void {
     const src = this.src;
     const len = this.srcEnd;
     let pos = this.pos;
+    const start = pos;
     let text = "";
     const bp = this._buildParts;
     let parts: WordPart[] | undefined;
     let litBuf = "";
     let litStart = 0;
     let preserveLiteral = false;
+    let hasGlobs = false;
     if (bp) {
       parts = [];
       litStart = pos;
@@ -2825,7 +2838,10 @@ export class Lexer {
       }
 
       text += src[pos];
-      if (bp) litBuf += src[pos];
+      if (bp) {
+        litBuf += src[pos];
+        if (globs && (ch === CH_STAR || ch === CH_QUESTION || ch === CH_LBRACKET)) hasGlobs = true;
+      }
       pos++;
     }
 
@@ -2841,7 +2857,15 @@ export class Lexer {
     if (bp) {
       this._wordParts =
         parts!.length > 1 || (parts!.length === 1 && (parts![0].type !== "Literal" || preserveLiteral)) ? parts! : null;
+      if (hasGlobs) this._wordParts = parseGlobParts(src, start, pos, this._wordParts) ?? null;
     }
+  }
+
+  private subFieldParts(start: number, end: number): WordPart[] | undefined {
+    if (this._nestingDepth >= MAX_SYNTAX_NESTING) return undefined;
+    return hasEmbeddedWordStructure(this.src, start, end)
+      ? this.parseSubFieldWord(start, end).parts
+      : parseGlobParts(this.src, start, end, undefined);
   }
 
   // Parse a parameter-expansion sub-field (operand, slice bound, replacement pattern) over
@@ -2849,7 +2873,7 @@ export class Lexer {
   // detached slice — gives the word and any nested substitutions absolute offsets, and
   // composes through nested ${...}. The `${...}` inner is a verbatim substring of the
   // source, so every sub-field offset maps straight back.
-  private parseSubFieldWord(start: number, end: number, insideDoubleQuotes = false, arithmetic = false): Word {
+  private parseSubFieldWord(start: number, end: number, context: SubFieldContext = "word", arithmetic = false): Word {
     if (start >= end) return new WordImpl("", start, start);
     // Sub-fields nest through readInnerWordText (nested expansions, arithmetic embedded
     // words); once the shared budget is spent, keep the raw span as an unstructured word.
@@ -2864,13 +2888,13 @@ export class Lexer {
 
     this.srcEnd = end;
     this.pos = start;
-    this.readInnerWordText(insideDoubleQuotes, arithmetic);
+    this.readInnerWordText(context === "quoted", arithmetic, context === "word");
 
     // text is the raw source span (so source.slice(pos, end) === text holds, as for every
     // other word); value resolves quotes via parts.
     const word = new WordImpl(this.src.slice(start, end), start, end);
-    if (this._buildParts && this._wordParts) {
-      word.parts = this._wordParts;
+    if (this._buildParts) {
+      word.parts = this._wordParts ?? undefined;
     }
 
     this.srcEnd = savedEnd;
@@ -3421,7 +3445,7 @@ export class Lexer {
     for (const node of commandExpansions) {
       this.collect(node, node.text.slice(2, -1), node.pos + 2, true);
     }
-    for (const node of embeddedWords) node.parts = this.parseSubFieldWord(node.pos, node.end, false, true).parts;
+    for (const node of embeddedWords) node.parts = this.parseSubFieldWord(node.pos, node.end, "embedded", true).parts;
     return expr;
   }
 
@@ -3682,7 +3706,8 @@ export class Lexer {
     };
     const ilen = inner.length;
     if (ilen === 0) return result;
-    const sub = (a: number, b: number): Word => this.parseSubFieldWord(innerStart + a, innerStart + b);
+    const sub = (a: number, b: number, context: SubFieldContext = "word"): Word =>
+      this.parseSubFieldWord(innerStart + a, innerStart + b, context);
     const closeBracket = (start: number): number => {
       const close = this.findClosingBracket(innerStart + start, innerStart + ilen);
       return close === -1 ? -1 : close - innerStart;
@@ -3707,7 +3732,7 @@ export class Lexer {
         result.parameter = inner.slice(1, nameEnd);
         result.parameterPos = innerStart + 1;
         result.parameterEnd = innerStart + nameEnd;
-        if (indexEnd !== -1) result.index = sub(nameEnd + 1, indexEnd);
+        if (indexEnd !== -1) result.index = sub(nameEnd + 1, indexEnd, "embedded");
         return result;
       }
     }
@@ -3721,7 +3746,7 @@ export class Lexer {
     if (i < ilen && inner.charCodeAt(i) === CH_LBRACKET) {
       const closeB = closeBracket(i + 1);
       if (closeB !== -1) {
-        result.index = sub(i + 1, closeB);
+        result.index = sub(i + 1, closeB, "embedded");
         i = closeB + 1;
       }
     }
@@ -3740,7 +3765,7 @@ export class Lexer {
         end,
         operatorEnd: innerStart + operandStart,
         operator: opChar === CH_COLON ? `:${defaultChar}` : defaultChar,
-        operand: this.parseSubFieldWord(innerStart + operandStart, innerStart + ilen, insideDoubleQuotes),
+        operand: sub(operandStart, ilen, insideDoubleQuotes ? "quoted" : "word"),
       };
       return result;
     }
@@ -3757,8 +3782,8 @@ export class Lexer {
         end,
         operatorEnd: sliceStart,
         operator: ":",
-        offset: sub(i, colonIdx === -1 ? ilen : i + colonIdx),
-        length: colonIdx === -1 ? undefined : sub(i + colonIdx + 1, ilen),
+        offset: sub(i, colonIdx === -1 ? ilen : i + colonIdx, "embedded"),
+        length: colonIdx === -1 ? undefined : sub(i + colonIdx + 1, ilen, "embedded"),
       };
       return result;
     }
