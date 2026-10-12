@@ -279,7 +279,7 @@ function parseArithmeticWithParts(
     }
   }
   for (const node of embeddedWords)
-    node.parts = computeEmbeddedWordParts(source, node, depth, lexer.getSubstitutionContext());
+    node.parts = computeEmbeddedWordParts(source, node, depth, lexer.getSubstitutionContext(), true);
   return expression;
 }
 

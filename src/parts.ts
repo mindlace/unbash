@@ -57,11 +57,12 @@ export function computeEmbeddedWordParts(
   word: Pick<Word, "pos" | "end">,
   depth = 0,
   context?: SubstitutionContext,
+  arithmetic = false,
 ): WordPart[] | undefined {
   if (!hasEmbeddedWordStructure(source, word.pos, word.end)) return undefined;
   const lexer = new Lexer(source, word.pos, word.end, false, context);
   lexer._nestingDepth = depth;
-  const parts = lexer.buildEmbeddedWordParts(word.pos);
+  const parts = lexer.buildEmbeddedWordParts(word.pos, arithmetic);
   if (!parts) return undefined;
   resolveCollected(lexer);
   return parts;

@@ -1162,10 +1162,10 @@ export class Lexer {
   }
 
   /** Scan a bounded word-like span without treating shell operators or whitespace as terminators. */
-  buildEmbeddedWordParts(startPos: number): WordPart[] | null {
+  buildEmbeddedWordParts(startPos: number, arithmetic = false): WordPart[] | null {
     this._buildParts = true;
     this.pos = startPos;
-    this.readInnerWordText();
+    this.readInnerWordText(false, arithmetic);
     return this._wordParts;
   }
 
@@ -2534,7 +2534,8 @@ export class Lexer {
     }
   }
 
-  private readInnerWordText(insideDoubleQuotes = false): void {
+  // Arithmetic text gets expansions and quote removal but no process substitution.
+  private readInnerWordText(insideDoubleQuotes = false, arithmetic = false): void {
     const src = this.src;
     const len = this.srcEnd;
     let pos = this.pos;
@@ -2695,6 +2696,7 @@ export class Lexer {
 
       if (
         !insideDoubleQuotes &&
+        !arithmetic &&
         (ch === CH_LT || ch === CH_GT) &&
         pos + 1 < len &&
         src.charCodeAt(pos + 1) === CH_LPAREN
@@ -2756,7 +2758,7 @@ export class Lexer {
   // detached slice — gives the word and any nested substitutions absolute offsets, and
   // composes through nested ${...}. The `${...}` inner is a verbatim substring of the
   // source, so every sub-field offset maps straight back.
-  private parseSubFieldWord(start: number, end: number, insideDoubleQuotes = false): Word {
+  private parseSubFieldWord(start: number, end: number, insideDoubleQuotes = false, arithmetic = false): Word {
     if (start >= end) return new WordImpl("", start, start);
     // Sub-fields nest through readInnerWordText (nested expansions, arithmetic embedded
     // words); once the shared budget is spent, keep the raw span as an unstructured word.
@@ -2771,7 +2773,7 @@ export class Lexer {
 
     this.srcEnd = end;
     this.pos = start;
-    this.readInnerWordText(insideDoubleQuotes);
+    this.readInnerWordText(insideDoubleQuotes, arithmetic);
 
     // text is the raw source span (so source.slice(pos, end) === text holds, as for every
     // other word); value resolves quotes via parts.
@@ -3325,7 +3327,7 @@ export class Lexer {
     for (const node of commandExpansions) {
       this.collect(node, node.text.slice(2, -1), node.pos + 2, true);
     }
-    for (const node of embeddedWords) node.parts = this.parseSubFieldWord(node.pos, node.end).parts;
+    for (const node of embeddedWords) node.parts = this.parseSubFieldWord(node.pos, node.end, false, true).parts;
     return expr;
   }
 

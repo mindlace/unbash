@@ -142,6 +142,27 @@ test("nested substitution scripts stop at a flagged boundary script", () => {
   assert.ok(boundary.errors?.some((e) => e.message === "maximum substitution nesting depth exceeded"));
 });
 
+// Materializes every lazy field and nested script through JSON, then collects every error.
+const materializedNodes = (ast: ParsedScript) => {
+  const nodes: { type?: string; errors?: { message: string }[] }[] = [];
+  const stack: unknown[] = [JSON.parse(JSON.stringify(ast))];
+  while (stack.length > 0) {
+    const value = stack.pop();
+    if (Array.isArray(value)) stack.push(...value);
+    else if (value && typeof value === "object") {
+      nodes.push(value);
+      stack.push(...Object.values(value));
+    }
+  }
+  return nodes;
+};
+
+const allErrors = (ast: ParsedScript) =>
+  materializedNodes(ast).flatMap((node) => node.errors?.map((error) => error.message) ?? []);
+
+const countOfType = (ast: ParsedScript, type: string) =>
+  materializedNodes(ast).filter((node) => node.type === type).length;
+
 // --- Nested command substitutions ---
 
 test("3-level nested $(...) command substitution", () => {
@@ -470,6 +491,14 @@ test("deeply nested arithmetic groups", () => {
 test("nested ternary in arithmetic", () => {
   const src = "(( x = a > 0 ? (b > 0 ? 1 : 2) : (c > 0 ? 3 : 4) ))";
   roundtrip(src);
+});
+
+test("arithmetic words do not contain process substitutions", () => {
+  for (const src of ["(( a b >(x) ))", "echo $(( a[1>(2)] ))", "(( a <(b) c ))"]) {
+    const ast = parse(src);
+    assert.equal(countOfType(ast, "ProcessSubstitution"), 0, src.slice(0, 16));
+    assert.deepEqual(allErrors(ast), [], src.slice(0, 16));
+  }
 });
 
 // --- Nested test expressions ---
