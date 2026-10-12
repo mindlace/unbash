@@ -1513,9 +1513,13 @@ class Parser {
     }
 
     const nameToken = this.tok.next(LexContext.Normal);
-    const declaration = nameToken.keywordEligible && isDeclarationCommand(nameToken.value);
+    const keyword = nameToken.keywordEligible ? nameToken.value : "";
     const name = this.toWord(nameToken);
-    ctx = declaration ? LexContext.Declaration : LexContext.Normal;
+    ctx = isDeclarationCommand(keyword)
+      ? LexContext.Declaration
+      : keyword === "eval" || keyword === "let"
+        ? LexContext.EvalArgument
+        : LexContext.Normal;
     lastEnd = name.end;
 
     // Check for function definition: word '(' ')' body

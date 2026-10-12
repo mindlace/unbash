@@ -13,6 +13,8 @@ const knownInvalidInputs = new Set([
   "( )",
   "while; do exit; done",
   "while false; do; done",
+  // `=(cmd)` is a Zsh process substitution; Bash only opens arrays after an assignment.
+  "foo =(bar)",
   // A leading `[` in a Bash array body opens a subscript that must close.
   "foo=([)",
   // `;|` is a MirBSD Korn shell and Zsh case terminator.

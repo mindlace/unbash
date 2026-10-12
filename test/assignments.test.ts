@@ -753,3 +753,50 @@ test("an unclosed subscript does not swallow the rest of the script", () => {
   assert.equal(script.commands.length, 2);
   assert.equal(nodeOfType(script.commands[1].command, "Command").name?.text, "echo");
 });
+
+test("an array value opens only right after an assignment operator where Bash accepts assignments", () => {
+  for (const [source, pos] of [
+    ["ls foo=(1 2)", 7],
+    ["echo a=(1)", 7],
+    ["builtin typeset a=(1 2 3)", 18],
+    ["command typeset a=(1 2 3)", 18],
+    ['declare -a "x"=(1)', 15],
+    ["for x in a=(); do :; done", 11],
+    ["case a=() in x) ;; esac", 8],
+    ["[[ x == a=(b) ]]", 10],
+    ["a=b=(1)", 4],
+  ] as const) {
+    assert.equal(parse(source).errors?.[0]?.pos, pos, source);
+  }
+  const fn = parse("%foo=()");
+  assert.ok(fn.errors !== undefined);
+  assert.equal(nodeOfType(fn.commands[0].command, "Function").name.text, "%foo=");
+
+  for (const source of [
+    "a=(1)",
+    "a+=(1)",
+    "a[0]=(1)",
+    "a[i + 1]=(1)",
+    "x=1 y=(2) env",
+    "declare a=(1) b=(2)",
+    "local -a a=(1)",
+    "typeset -A m=([k]=v)",
+    "alias a=(1)",
+    "x=1 declare a=(1)",
+    "f() { local a=(1); }",
+    "a=\\\n(1)",
+    "eval a=(1)",
+    "let a=(1)",
+    "echo a=@(b) @(c|d)",
+  ]) {
+    assert.equal(parse(source).errors, undefined, source);
+  }
+  const evaluated = parse("eval a=(1 2) b=c").commands[0].command as Command;
+  assert.deepEqual(
+    evaluated.suffix.map((item) => [item.type, item.type === "Word" ? item.text : undefined]),
+    [
+      ["Word", "a=(1 2)"],
+      ["Word", "b=c"],
+    ],
+  );
+});

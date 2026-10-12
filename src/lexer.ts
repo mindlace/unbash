@@ -542,6 +542,8 @@ export const LexContext = {
   ArrayElement: 5,
   FunctionName: 6,
   CasePattern: 7,
+  // Arguments of eval and let: ordinary words, but `name=(…)` keeps its array value as in Bash.
+  EvalArgument: 8,
 } as const;
 export type LexContext = (typeof LexContext)[keyof typeof LexContext];
 
@@ -1964,7 +1966,7 @@ export class Lexer {
   private _hereQuoted = false;
 
   private readWord(out: TokenValue, ctx: LexContext, tokenStart: number = 0): void {
-    this.readWordText(false, ctx);
+    this.readWordText(false, ctx, true);
     if (ctx === LexContext.Normal) {
       const next = this.pos < this.srcEnd ? this.src.charCodeAt(this.pos) : 0;
       if (!this._wordRaw || (next !== CH_LT && next !== CH_GT)) {
@@ -2156,7 +2158,8 @@ export class Lexer {
 
   // `subscripts` re-reads a word known to stop inside an array subscript, where
   // metacharacters are ordinary text.
-  private readWordText(subscripts = false, ctx: LexContext = LexContext.Normal): void {
+  // `scanning` marks the first scan of a token, which decides where the word ends.
+  private readWordText(subscripts = false, ctx: LexContext = LexContext.Normal, scanning = false): void {
     const src = this.src;
     const len = this.srcEnd;
     let pos = this.pos;
@@ -2246,6 +2249,21 @@ export class Lexer {
           )
             break;
           const prefixChar = lastValueChar;
+          // Bash opens an array value only right after the operator of a word that can assign;
+          // elsewhere `(` ends the word. Rescans of a known word span keep its value.
+          if (
+            prefixChar === CH_EQ &&
+            scanning &&
+            !(
+              (ctx === LexContext.CommandStart ||
+                ctx === LexContext.CommandPrefix ||
+                ctx === LexContext.Declaration ||
+                ctx === LexContext.EvalArgument) &&
+              isMatchedAssignment(assignmentState) &&
+              skipLineContinuations(src, assignmentOperatorPos(assignmentState) + 1, len) === pos
+            )
+          )
+            break;
           const innerStart = pos + 1;
           const close = this.findClosingShellDelimiter(innerStart, len, CH_RPAREN, prefixChar === CH_EQ);
           if (
