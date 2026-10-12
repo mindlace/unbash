@@ -2836,8 +2836,11 @@ export class Lexer {
                 this.pos++;
                 break;
               }
-            } else if (c === CH_LBRACE && this.pos > 0 && src.charCodeAt(this.pos - 1) === CH_DOLLAR) d++;
-            else if (c === CH_BACKSLASH) {
+            } else if (c === CH_DOLLAR && this.pos + 1 < len) {
+              const next = src.charCodeAt(this.pos + 1);
+              if (next === CH_LBRACE) d++;
+              if (next === CH_LBRACE || next === CH_DOLLAR) this.pos++;
+            } else if (c === CH_BACKSLASH) {
               this.pos++;
             } else if (c === CH_SQUOTE) {
               this.pos++;

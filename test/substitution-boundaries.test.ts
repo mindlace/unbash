@@ -46,6 +46,27 @@ test("a comment after a negated subshell does not close the command substitution
   assert.equal(verify(source, ast), source);
 });
 
+test("quoted defaults do not treat escaped or consumed dollars as nested expansions", () => {
+  for (const word of ['"${x:-\\${a}"', '"${x:-$${a}"', '"${x:-$$${a}}"', '"${x:-${a}}"']) {
+    for (const opener of ["$(", "<("]) {
+      const source = `echo ${opener}echo ${word}) tail`;
+      const ast = parse(source);
+      assert.equal(ast.errors, undefined, source);
+      const command = nodeOfType(ast.commands[0].command, "Command");
+      const expansion = nodeOfType(
+        nodeOfType(command.args[0], "Word").parts?.[0],
+        "CommandExpansion",
+        "ProcessSubstitution",
+      );
+      const script = expansion.script!;
+      assert.equal(script.errors, undefined, source);
+      assert.equal(nodeOfType(script.commands[0].command, "Command").args[0].text, word, source);
+      assert.equal(nodeOfType(command.args[1], "Word").text, "tail", source);
+      assert.equal(verify(source, ast), source);
+    }
+  }
+});
+
 test("command and process substitution boundaries use function and assignment grammar", () => {
   for (const body of [
     "!(echo inside)\\\n# )\necho after",
