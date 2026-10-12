@@ -685,6 +685,24 @@ test("word parts in binary left/right", () => {
 
 // --- Edge cases ---
 
+test("unquoted < and > are not operands, and && or || cannot start a primary (Bash 5.3 rejects them)", () => {
+  for (const [source, message, pos] of [
+    ["[[ -f < ]]", "unexpected argument '<' to conditional operator", 6],
+    ["[[ -f > ]]", "unexpected argument '>' to conditional operator", 6],
+    ["[[ a == < ]]", "unexpected argument '<' to conditional operator", 8],
+    ["[[ a < > ]]", "unexpected argument '>' to conditional operator", 7],
+    ["[[ && ]]", "unexpected token '&&'", 3],
+    ["[[ || ]]", "unexpected token '||'", 3],
+    ["[[ ! && ]]", "unexpected token '&&'", 5],
+    ["[[ ( && ) ]]", "unexpected token '&&'", 5],
+  ] as const) {
+    assert.deepEqual(parse(source).errors, [{ message, pos }], source);
+  }
+  for (const source of ['[[ -f "<" ]]', "[[ -f \\< ]]", "[[ -n == ]]", "[[ -n -f ]]", "[[ a < b ]]", "[[ a > b ]]"]) {
+    assert.equal(parse(source).errors, undefined, source);
+  }
+});
+
 test("unary operator without an operand reports an error (Bash 5.3 rejects it)", () => {
   for (const [source, operator, pos, select] of [
     ["[[ -f ]]", "-f", 5, (e: TestExpression) => e],

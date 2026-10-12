@@ -1395,6 +1395,7 @@ class Parser {
     }
 
     const first = this.tok.next(LexContext.TestMode);
+    if (first.token === Token.And || first.token === Token.Or) this.unexpectedToken(first);
     const val = first.value;
     const firstPos = first.pos;
     const firstEnd = first.end;
@@ -1403,7 +1404,7 @@ class Parser {
     // operand, so keep the operator and report the missing word instead of demoting it to a string.
     if (first.keywordEligible && UNARY_TEST_OPS[val] === 1) {
       if (this.tok.peek(LexContext.TestMode).token === Token.Word) {
-        const operand = this.readWord(LexContext.TestMode);
+        const operand = this.readTestOperand();
         return {
           type: "TestUnary",
           pos: firstPos,
@@ -1433,7 +1434,7 @@ class Parser {
           this.depth,
         );
       } else {
-        right = this.readWord(LexContext.TestMode);
+        right = this.readTestOperand();
       }
       const left = this.toWordFromPosEnd(first, firstPos, firstEnd);
       return {
@@ -1449,6 +1450,14 @@ class Parser {
     // Standalone word (implicit -n test)
     const w = this.toWordFromPosEnd(first, firstPos, firstEnd);
     return { type: "TestUnary", pos: firstPos, end: w.end, operator: "-n", operand: w } satisfies TestUnaryExpression;
+  }
+
+  // Unquoted `<` and `>` are operators in `[[ ]]`, never operands.
+  private readTestOperand(): Word {
+    const t = this.tok.next(LexContext.TestMode);
+    if (t.keywordEligible && (t.value === "<" || t.value === ">"))
+      this.error(`unexpected argument '${t.value}' to conditional operator`, t.pos);
+    return this.toWord(t);
   }
 
   // function_def with 'function' keyword
