@@ -888,3 +888,34 @@ test("arithmetic for headers need exactly three expressions", () => {
   const initialize = nodeOfType(open.commands[0].command, "ArithmeticFor").initialize;
   assert.equal(initialize?.type === "ArithmeticBinary" ? initialize.operator : undefined, "=");
 });
+
+test("arithmetic for headers preserve substitution comment boundaries", () => {
+  const source = "for ((i=$(! (printf 1)# )\nprintf 2);i<3;i++)); do :; done";
+  const ast = parse(source);
+  assert.equal(ast.errors, undefined);
+  const loop = nodeOfType(ast.commands[0].command, "ArithmeticFor");
+  const initialize = nodeOfType(loop.initialize, "ArithmeticBinary");
+  assert.equal(initialize.operator, "=");
+  const expansion = nodeOfType(initialize.right, "ArithmeticCommandExpansion");
+  assert.equal(expansion.script?.errors, undefined);
+  assert.deepEqual(
+    expansion.script?.commands.map((statement) => statement.command.type),
+    ["Negation", "Command"],
+  );
+  assert.equal(nodeOfType(loop.test, "ArithmeticBinary").operator, "<");
+  assert.equal(nodeOfType(loop.update, "ArithmeticUnary").operator, "++");
+  assert.equal(nodeOfType(loop.body.commands[0].command, "Command").name?.text, ":");
+});
+
+test("arithmetic for headers keep backtick semicolons inside their expression", () => {
+  const ast = parse("for ((i=`printf 1; printf 2`;i<3;i++)); do :; done");
+  assert.equal(ast.errors, undefined);
+  const loop = nodeOfType(ast.commands[0].command, "ArithmeticFor");
+  const initialize = nodeOfType(loop.initialize, "ArithmeticBinary");
+  const word = nodeOfType(initialize.right, "ArithmeticWord");
+  const expansion = nodeOfType(word.parts?.[0], "CommandExpansion");
+  assert.equal(expansion.script?.errors, undefined);
+  assert.equal(expansion.script?.commands.length, 2);
+  assert.equal(nodeOfType(loop.test, "ArithmeticBinary").operator, "<");
+  assert.equal(nodeOfType(loop.update, "ArithmeticUnary").operator, "++");
+});

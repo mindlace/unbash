@@ -44,6 +44,19 @@ test("$() inner script is parsed via CommandExpansion part", () => {
   }
 });
 
+test("a comment after an ordinary nested substitution preserves its enclosing script", () => {
+  const source = "echo $(echo $(printf a) # )\nprintf b)";
+  const ast = parse(source);
+  assert.equal(ast.errors, undefined);
+  const word = nodeOfType(getCmd(ast).args[0], "Word");
+  const expansion = nodeOfType(word.parts?.[0], "CommandExpansion");
+  assert.equal(expansion.script?.errors, undefined);
+  assert.equal(expansion.script?.commands.length, 2);
+  assert.equal(nodeOfType(getCmd(expansion.script!, 1).args[0], "Word").text, "b");
+  assert.equal(print(ast), source);
+  assert.equal(verify(source, ast), source);
+});
+
 test("nested $() in double quotes", () => {
   const ast = parse("node --maxWorkers=\"$(node -e 'process.stdout.write(os.cpus().length.toString())')\"");
   assert.ok(ast.commands.length >= 1);

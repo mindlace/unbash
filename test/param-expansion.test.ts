@@ -2,6 +2,7 @@ import { nodeOfType } from "./ast-helpers.ts";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { parse } from "../src/parser.ts";
+import { print } from "../src/printer.ts";
 import type { Assignment, Command, ParameterExpansionPart, ParameterOperation, Word } from "../src/types.ts";
 import { computeWordParts } from "../src/parts.ts";
 
@@ -75,6 +76,133 @@ test("extquote stays enabled inside double-quoted parameter operands", () => {
   const operand = getOperand(getQuotedParam(word))!;
   assert.equal(operand.value, "a\tb");
   assert.deepEqual(operand.parts, [{ type: "AnsiCQuoted", pos: 30, end: 37, text: "$'a\\tb'", value: "a\tb" }]);
+});
+
+test("double-quoted default operands preserve ordinary single quotes", () => {
+  for (const operator of ["-", ":-", "=", ":=", "+", ":+", "?", ":?"]) {
+    const source = `echo "\${x${operator}'b'}" tail`;
+    const ast = parse(source);
+    assert.equal(ast.errors, undefined, source);
+    const command = getCmd(ast);
+    const operand = getOperand(getQuotedParam(nodeOfType(command.suffix[0], "Word")))!;
+    assert.equal(operand.text, "'b'", source);
+    assert.equal(operand.value, "'b'", source);
+    assert.equal(operand.parts, undefined, source);
+    assert.equal(nodeOfType(command.suffix[1], "Word").value, "tail", source);
+  }
+});
+
+test("literal single quotes in quoted defaults do not hide nested commands", () => {
+  const source = "echo \"${x:-'$(printf visible)'}\" tail";
+  const ast = parse(source);
+  assert.equal(ast.errors, undefined);
+  assert.equal(print(ast), "echo \"${x:-'$(printf visible)'}\" tail");
+  const command = getCmd(ast);
+  const operand = getOperand(getQuotedParam(nodeOfType(command.suffix[0], "Word")))!;
+  assert.equal(operand.value, "'$(printf visible)'");
+  assert.deepEqual(
+    operand.parts?.map((part) => [part.type, part.pos, part.end]),
+    [
+      ["Literal", 11, 12],
+      ["CommandExpansion", 12, 29],
+      ["Literal", 29, 30],
+    ],
+  );
+  const expansion = nodeOfType(operand.parts?.[1], "CommandExpansion");
+  assert.equal(expansion.script?.errors, undefined);
+  assert.equal(getCmd(expansion.script!).name?.value, "printf");
+  assert.equal(nodeOfType(getCmd(expansion.script!).suffix[0], "Word").value, "visible");
+  assert.equal(nodeOfType(command.suffix[1], "Word").value, "tail");
+  assert.equal(print(JSON.parse(JSON.stringify(ast))), "echo \"${x:-'$(printf visible)'}\" tail");
+});
+
+test("quoted default context propagates through nested parameters", () => {
+  const source = "echo \"${x:-${y:-'$(printf visible)'}}\"";
+  const ast = parse(source);
+  assert.equal(ast.errors, undefined);
+  const outer = getQuotedParam(nodeOfType(getCmd(ast).suffix[0], "Word"));
+  const nested = getParam(getOperand(outer)!);
+  const operand = getOperand(nested)!;
+  assert.equal(operand.value, "'$(printf visible)'");
+  assert.equal(getCmd(nodeOfType(operand.parts?.[1], "CommandExpansion").script!).name?.value, "printf");
+});
+
+test("quoted defaults preserve ambiguous substitution boundaries", () => {
+  const source = "echo \"${x:-'$( !(echo inside)# )\necho after)'}\" tail";
+  const ast = parse(source);
+  assert.equal(ast.errors, undefined);
+  const command = getCmd(ast);
+  const operand = getOperand(getQuotedParam(nodeOfType(command.suffix[0], "Word")))!;
+  const expansion = nodeOfType(operand.parts?.[1], "CommandExpansion");
+  assert.equal(expansion.script?.errors, undefined);
+  assert.deepEqual(
+    expansion.script?.commands.map((statement) => statement.command.type),
+    ["Negation", "Command"],
+  );
+  assert.equal(nodeOfType(getCmd(expansion.script!, 1).args[0], "Word").value, "after");
+  assert.equal(nodeOfType(command.args[1], "Word").value, "tail");
+});
+
+test("quoted parameter patterns retain their own quoting context", () => {
+  for (const source of ["echo \"${x#'$(printf hidden)'}\"", "echo \"${x/'$(printf hidden)'/'b'}\""]) {
+    const ast = parse(source);
+    assert.equal(ast.errors, undefined, source);
+    const part = getQuotedParam(nodeOfType(getCmd(ast).suffix[0], "Word"));
+    const operation = part.operation!;
+    const operand = operation.type === "Remove" ? operation.operand : nodeOfType(operation, "Replace").pattern;
+    assert.deepEqual(
+      operand.parts?.map((child) => child.type),
+      ["SingleQuoted"],
+      source,
+    );
+    assert.equal(operand.value, "$(printf hidden)", source);
+    if (operation.type === "Replace") assert.equal(operation.replacement.value, "b");
+  }
+  const ast = parse("echo \"${x#${y:-'b'}}\"");
+  const part = getQuotedParam(nodeOfType(getCmd(ast).suffix[0], "Word"));
+  assert.equal(getOperand(getParam(getOperand(part)!))!.value, "b");
+});
+
+test("quoted default matching keeps default Bash single-quote delimiters", () => {
+  const source = "echo \"${x:-'}'}\" tail";
+  const ast = parse(source);
+  assert.equal(ast.errors, undefined);
+  const command = getCmd(ast);
+  const operand = getOperand(getQuotedParam(nodeOfType(command.suffix[0], "Word")))!;
+  assert.equal(operand.text, "'}'");
+  assert.equal(operand.value, "'}'");
+  assert.equal(nodeOfType(command.suffix[1], "Word").value, "tail");
+  assert.ok(parse('echo "${x:-\'b}"').errors);
+});
+
+test("quoted defaults preserve non-special escapes and literal process syntax", () => {
+  const ast = parse('echo "${x:-\\q}" "${x:-\\}}" "${x:-<(printf hidden)}"');
+  assert.equal(ast.errors, undefined);
+  const command = getCmd(ast);
+  assert.deepEqual(
+    command.suffix.map((word) => getOperand(getQuotedParam(nodeOfType(word, "Word")))!.value),
+    ["\\q", "}", "<(printf hidden)"],
+  );
+  assert.equal(getOperand(getQuotedParam(nodeOfType(command.suffix[2], "Word")))!.parts, undefined);
+});
+
+test("quotes nested inside a quoted default remove their own escapes", () => {
+  const ast = parse('echo "${x:-"\\q"\\z}" "${x:-"${y:-\'b\'}"}"');
+  assert.equal(ast.errors, undefined);
+  const command = getCmd(ast);
+  const operand = getOperand(getQuotedParam(nodeOfType(command.suffix[0], "Word")))!;
+  assert.equal(operand.value, "q\\z");
+  assert.deepEqual(
+    operand.parts?.map((part) => part.type),
+    ["DoubleQuoted", "Literal"],
+  );
+  const nestedOperand = getOperand(getQuotedParam(nodeOfType(command.suffix[1], "Word")))!;
+  assert.equal(getOperand(getQuotedParam(nestedOperand))!.value, "'b'");
+  assert.equal(getOperand(getPart('echo ${x:-"\\q"}'))!.value, "\\q");
+  const locale = parse('echo "${x:-$"\\q"}"');
+  const localeOperand = getOperand(getQuotedParam(nodeOfType(getCmd(locale).suffix[0], "Word")))!;
+  assert.equal(localeOperand.value, "q");
+  assert.equal(localeOperand.parts?.[0].type, "LocaleString");
 });
 
 test("ANSI-C \\c operand ends where the skip and decode paths agree", () => {

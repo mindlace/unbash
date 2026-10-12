@@ -1,0 +1,252 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import { spawnSync } from "node:child_process";
+import { parse } from "../src/parser.ts";
+import { nodeOfType } from "./ast-helpers.ts";
+import { verify } from "./verify.ts";
+
+function characterReads(source: string): number {
+  const charCodeAt = String.prototype.charCodeAt;
+  let count = 0;
+  String.prototype.charCodeAt = function (index: number): number {
+    count++;
+    return charCodeAt.call(this, index);
+  };
+  try {
+    const ast = parse(source);
+    assert.equal(ast.errors, undefined);
+    JSON.stringify(ast);
+  } finally {
+    String.prototype.charCodeAt = charCodeAt;
+  }
+  return count;
+}
+
+test("a comment after a negated subshell does not close the command substitution", () => {
+  const source = "echo $(!(echo inside)# )\necho after)";
+  const ast = parse(source);
+  assert.equal(ast.errors, undefined);
+  assert.equal(ast.commands.length, 1);
+  const command = nodeOfType(ast.commands[0].command, "Command");
+  const word = nodeOfType(command.args[0], "Word");
+  const expansion = nodeOfType(word.parts?.[0], "CommandExpansion");
+  assert.deepEqual([expansion.pos, expansion.end], [5, 36]);
+  const script = expansion.script!;
+  assert.equal(script.errors, undefined);
+  assert.deepEqual([script.pos, script.end], [7, 35]);
+  assert.equal(script.commands.length, 2);
+  const negation = nodeOfType(script.commands[0].command, "Negation");
+  const subshell = nodeOfType(negation.command, "Subshell");
+  assert.equal(nodeOfType(subshell.body.commands[0].command, "Command").name?.text, "echo");
+  const after = nodeOfType(script.commands[1].command, "Command");
+  assert.deepEqual(
+    after.args.map((arg) => arg.text),
+    ["after"],
+  );
+  assert.equal(verify(source, ast), source);
+});
+
+test("command and process substitution boundaries use function and assignment grammar", () => {
+  for (const body of [
+    "!(echo inside)\\\n# )\necho after",
+    "function x@(echo inside)# )\necho after",
+    "function x!(echo inside)# )\necho after",
+    "function x+(echo inside)# )\necho after",
+    "function x*(echo inside)# )\necho after",
+    "function x?(echo inside)# )\necho after",
+    "function x=(echo inside)# )\necho after",
+    "x@()# )\n{ echo inside; }; echo after",
+    "a[(1)#x]=x; echo after",
+    "a[(1) #x]=x; echo after",
+    "a[(1)]=x; !(echo inside)# )\necho after",
+    "!(cat <<EOF\n)\nEOF\n)# )\necho after",
+  ]) {
+    for (const opener of ["$(", "<("]) {
+      const source = `echo ${opener}${body}) tail`;
+      const ast = parse(source);
+      assert.equal(ast.errors, undefined, source);
+      assert.equal(ast.commands.length, 1, source);
+      const command = nodeOfType(ast.commands[0].command, "Command");
+      const word = nodeOfType(command.args[0], "Word");
+      const expansion = nodeOfType(word.parts?.[0], "CommandExpansion", "ProcessSubstitution");
+      const script = expansion.script!;
+      assert.equal(script.errors, undefined, source);
+      assert.equal(source.slice(script.pos, script.end), body, source);
+      const after = nodeOfType(script.commands.at(-1)?.command, "Command");
+      assert.deepEqual(
+        after.args.map((arg) => arg.text),
+        ["after"],
+        source,
+      );
+      assert.equal(nodeOfType(command.args[1], "Word").text, "tail", source);
+      assert.equal(verify(source, ast), source);
+    }
+  }
+});
+
+test("hashes adjacent to extglob operands remain word data", () => {
+  for (const body of [
+    "echo !(x)#literal; echo after",
+    "A=1 !(x)#literal; echo after",
+    ">out !(x)#literal; echo after",
+    "echo !\\\n(x)#literal; echo after",
+    "case x in !(bad)) echo match;; esac; echo after",
+  ]) {
+    const source = `echo $(${body}) tail`;
+    const ast = parse(source);
+    assert.equal(ast.errors, undefined, source);
+    const command = nodeOfType(ast.commands[0].command, "Command");
+    const expansion = nodeOfType(nodeOfType(command.args[0], "Word").parts?.[0], "CommandExpansion");
+    assert.equal(expansion.script?.errors, undefined, source);
+    assert.equal(source.slice(expansion.script!.pos, expansion.script!.end), body, source);
+    assert.equal(nodeOfType(command.args[1], "Word").text, "tail", source);
+  }
+});
+
+test("ambiguous substitution boundaries retain the shared nesting limit", () => {
+  const source = "echo $(".repeat(512) + "!(echo inside)# )\necho after" + ")".repeat(512);
+  const ast = parse(source);
+  assert.ok(ast.errors?.some((error) => error.message === "maximum command substitution nesting depth exceeded"));
+  assert.doesNotThrow(() => JSON.stringify(ast));
+});
+
+test("nested ambiguous boundaries do not depend on a warmed-up call stack", () => {
+  const parser = new URL("../src/parser.ts", import.meta.url).href;
+  const result = spawnSync(
+    process.execPath,
+    [
+      "--input-type=module",
+      "--eval",
+      `import { parse } from ${JSON.stringify(parser)};
+     import assert from "node:assert/strict";
+     for (const command of ["echo", "coproc worker"]) {
+       let source = "echo leaf";
+       for (let i = 0; i < 256; i++) source = command + " $(!(" + source + ")# )\\necho tail)";
+       const ast = parse(source);
+       assert.equal(ast.errors, undefined);
+       const node = ast.commands[0].command;
+       const call = node.type === "Coproc" ? node.body : node;
+       const script = call.args[0].parts[0].script;
+       assert.equal(script.errors, undefined);
+       assert.equal(script.commands[0].command.type, "Negation");
+       JSON.stringify(ast);
+     }
+     const compound = ":; " + "( ".repeat(256) + "echo $(!(echo leaf)# )\\necho tail)" + " )".repeat(256);
+     const mixed = parse("echo $(echo $(" + compound + "); echo $(!(echo sibling)# )\\necho tail))");
+     assert.equal(mixed.errors, undefined);
+     JSON.stringify(mixed);
+     console.log("ok");`,
+    ],
+    { encoding: "utf8", timeout: 10000 },
+  );
+  assert.equal(result.status, 0, result.stderr || result.error?.message);
+  assert.equal(result.stdout, "ok\n");
+});
+
+test("materializing nested substitutions does not repeatedly scan every enclosing script", () => {
+  const reads = (depth: number): number => {
+    let source = "echo leaf";
+    for (let i = 0; i < depth; i++) source = "echo $(! (" + source + ")# )\necho tail)";
+    return characterReads(source);
+  };
+  const small = reads(32);
+  const large = reads(64);
+  assert.ok(large < small * 5, `doubling nesting increased character reads from ${small} to ${large}`);
+});
+
+test("sibling substitution boundaries do not repeatedly parse preceding commands", () => {
+  const sibling = "echo $(!(echo leaf)# )\necho tail); ";
+  for (const [open, close] of [
+    ["", ""],
+    ["{ ", "}"],
+    ["if :; then ", "fi"],
+    ["for x in y; do ", "done"],
+  ]) {
+    const small = characterReads("echo $(" + open + sibling.repeat(32) + close + ")");
+    const large = characterReads("echo $(" + open + sibling.repeat(64) + close + ")");
+    assert.ok(large < small * 3, `doubling siblings increased character reads from ${small} to ${large}`);
+  }
+  const ast = parse("echo $({ " + sibling.repeat(512) + "})");
+  assert.equal(ast.errors, undefined);
+  const command = nodeOfType(ast.commands[0].command, "Command");
+  const expansion = nodeOfType(nodeOfType(command.args[0], "Word").parts?.[0], "CommandExpansion");
+  assert.equal(expansion.script?.errors, undefined);
+  const group = nodeOfType(expansion.script?.commands[0].command, "BraceGroup");
+  assert.equal(group.body.commands.length, 512);
+});
+
+test("nested script scopes isolate arithmetic, case patterns, and pending heredocs", () => {
+  const arithmetic = parse("echo $(echo $((1 + $(!(printf 1)# )\nprintf 2))); echo $(!(echo sibling)# )\necho tail))");
+  const commandCounts: number[] = [];
+  JSON.stringify(arithmetic, (_key, value) => {
+    if (value?.type === "Script") {
+      assert.equal(value.errors, undefined);
+      commandCounts.push(value.commands.length);
+    }
+    return value;
+  });
+  assert.deepEqual(commandCounts, [1, 2, 2, 2]);
+  for (const source of [
+    "echo $(echo $((case + 1)))",
+    "echo $(case x in x) echo $(!(echo inner)# )\necho tail);; esac; echo after)",
+    "echo $(case x in x) echo $(case y in y) !(echo inner)# )\necho tail;; esac);; esac; echo after)",
+    "echo $(case x in $(case y in y) echo x;; esac)) echo matched;; esac)",
+    "echo $(cat <<EOF $(!(echo inner)# )\necho tail)\nbody\nEOF\n)",
+    "echo $(echo <(!(echo inner)# )\necho tail); echo after)",
+    "echo $(echo >(!(echo inner)# )\necho tail); echo after)",
+    "echo $(echo $\\\n(!(echo inner)# )\necho tail); echo after)",
+    "echo $(echo $((1<(2)))); echo after",
+  ]) {
+    const ast = parse(source);
+    JSON.stringify(ast, (_key, value) => {
+      if (value?.type === "Script") assert.equal(value.errors, undefined, source);
+      return value;
+    });
+    assert.equal(verify(source, ast), source);
+  }
+});
+
+test("nested substitution boundaries survive every lazy container", () => {
+  let inner = "echo leaf";
+  for (let i = 0; i < 4; i++) inner = "echo $(! (" + inner + ")# )\necho tail)";
+  const expansion = inner.slice(5);
+  for (const source of [
+    "value=" + expansion,
+    "array[" + expansion + "]=value",
+    "array=(" + expansion + ")",
+    "array=([" + expansion + "]=value)",
+    "((" + expansion + "))",
+    'for ((i="' + expansion + '";i<3;i++)); do :; done',
+    "cat <<EOF\n" + expansion + "\nEOF",
+    "[[ x =~ " + expansion + " ]]",
+    "echo >" + expansion,
+    'echo "${value:-' + expansion + '}"',
+  ]) {
+    const ast = parse(source);
+    let substitutions = 0;
+    JSON.stringify(ast, (_key, value) => {
+      if (value?.type === "Script") assert.equal(value.errors, undefined, source);
+      if (value?.type === "CommandExpansion" || value?.type === "ArithmeticCommandExpansion") substitutions++;
+      return value;
+    });
+    assert.equal(substitutions, 4, source);
+    assert.equal(verify(source, ast), source);
+  }
+});
+
+test("decoded backticks keep an independent source after an ambiguous substitution", () => {
+  const source = "echo $(!(echo first)# )\necho last) `echo \\$(!(echo inner)# )\necho tail)`";
+  const ast = parse(source);
+  assert.equal(ast.errors, undefined);
+  const command = nodeOfType(ast.commands[0].command, "Command");
+  const backtick = nodeOfType(nodeOfType(command.args[1], "Word").parts?.[0], "CommandExpansion");
+  assert.equal(backtick.script?.source, "echo $(!(echo inner)# )\necho tail)");
+  const decoded = backtick.script!;
+  assert.equal(decoded.errors, undefined);
+  const nested = nodeOfType(nodeOfType(decoded.commands[0].command, "Command").args[0], "Word");
+  const expansion = nodeOfType(nested.parts?.[0], "CommandExpansion");
+  assert.deepEqual([expansion.pos, expansion.end], [5, 34]);
+  assert.equal(expansion.script?.errors, undefined);
+  assert.equal(expansion.script?.commands.length, 2);
+  assert.equal(verify(source, ast), source);
+});

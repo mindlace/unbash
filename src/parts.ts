@@ -1,6 +1,31 @@
 import type { Word, WordPart } from "./internal-types.ts";
 import { hasEmbeddedWordStructure, Lexer, MAX_SYNTAX_NESTING } from "./lexer.ts";
 import { parseRegion } from "./parser.ts";
+import type { PartsResolver } from "./word.ts";
+import type { SubstitutionContext } from "./substitution-context.ts";
+
+export function wordPartsResolver(context: SubstitutionContext | undefined): PartsResolver | undefined {
+  if (context === undefined) return undefined;
+  return (
+    context.wordParts ?? (context.wordParts = (source, word, depth) => computeWordParts(source, word, depth, context))
+  );
+}
+
+export function embeddedPartsResolver(context: SubstitutionContext | undefined): PartsResolver {
+  if (context === undefined) return computeEmbeddedWordParts;
+  return (
+    context.embeddedParts ??
+    (context.embeddedParts = (source, word, depth) => computeEmbeddedWordParts(source, word, depth, context))
+  );
+}
+
+export function arrayPartsResolver(context: SubstitutionContext | undefined): PartsResolver {
+  if (context === undefined) return computeArrayElementParts;
+  return (
+    context.arrayParts ??
+    (context.arrayParts = (source, word, depth) => computeArrayElementParts(source, word, depth, context))
+  );
+}
 
 /**
  * Compute the structural parts of a word by re-scanning the source.
@@ -8,12 +33,17 @@ import { parseRegion } from "./parser.ts";
  *
  * Returns undefined for simple words (no quotes, expansions, or special structure).
  */
-export function computeWordParts(source: string, word: Pick<Word, "pos" | "end">, depth = 0): WordPart[] | undefined {
+export function computeWordParts(
+  source: string,
+  word: Pick<Word, "pos" | "end">,
+  depth = 0,
+  context?: SubstitutionContext,
+): WordPart[] | undefined {
   // Bound the re-lex to the word's span. A word inside a substitution script carries the
   // whole original as its source, so an unbounded scan would overrun the word into an
   // adjacent delimiter (e.g. a backtick or `)` immediately after it). For top-level words
   // word.end is the natural boundary, so the bound is a no-op.
-  const lexer = new Lexer(source, word.pos, word.end);
+  const lexer = new Lexer(source, word.pos, word.end, false, context);
   lexer._nestingDepth = depth;
   const parts = lexer.buildWordParts(word.pos);
   if (!parts) return undefined;
@@ -26,9 +56,10 @@ export function computeEmbeddedWordParts(
   source: string,
   word: Pick<Word, "pos" | "end">,
   depth = 0,
+  context?: SubstitutionContext,
 ): WordPart[] | undefined {
   if (!hasEmbeddedWordStructure(source, word.pos, word.end)) return undefined;
-  const lexer = new Lexer(source, word.pos, word.end);
+  const lexer = new Lexer(source, word.pos, word.end, false, context);
   lexer._nestingDepth = depth;
   const parts = lexer.buildEmbeddedWordParts(word.pos);
   if (!parts) return undefined;
@@ -36,8 +67,13 @@ export function computeEmbeddedWordParts(
   return parts;
 }
 
-export function computeArrayElementParts(source: string, word: Word, depth = 0): WordPart[] | undefined {
-  const lexer = new Lexer(source, word.pos, word.end);
+export function computeArrayElementParts(
+  source: string,
+  word: Word,
+  depth = 0,
+  context?: SubstitutionContext,
+): WordPart[] | undefined {
+  const lexer = new Lexer(source, word.pos, word.end, false, context);
   lexer._nestingDepth = depth;
   const parts = lexer.buildArrayElementParts(word.pos);
   if (!parts) return undefined;
@@ -54,8 +90,9 @@ export function computeHereDocBodyParts(
   source: string,
   word: Pick<Word, "pos" | "end">,
   depth = 0,
+  context?: SubstitutionContext,
 ): WordPart[] | undefined {
-  const lexer = new Lexer(source, word.pos, word.end);
+  const lexer = new Lexer(source, word.pos, word.end, false, context);
   lexer._nestingDepth = depth;
   const parts = lexer.buildHereDocParts(word.pos, word.end);
   if (!parts) return undefined;
@@ -80,7 +117,14 @@ function resolveCollected(lexer: Lexer): void {
     const depth = innerDepth + 1;
     if (depth > MAX_SYNTAX_NESTING + 1) continue;
     if (innerStart !== undefined) {
-      part.script = parseRegion(source, innerStart, innerStart + inner.length, depth, parenBoundary);
+      part.script = parseRegion(
+        source,
+        innerStart,
+        innerStart + inner.length,
+        depth,
+        parenBoundary,
+        lexer.getSubstitutionContext(),
+      );
     } else {
       part.script = parseRegion(inner, 0, inner.length, depth);
       part.script.source = inner;

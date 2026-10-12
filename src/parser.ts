@@ -47,7 +47,14 @@ import type {
 } from "./internal-types.ts";
 import { hasEmbeddedWordStructure, LexContext, MAX_SYNTAX_NESTING, Token, Lexer, TokenValue } from "./lexer.ts";
 import { parseArithmeticExpression } from "./arithmetic.ts";
-import { computeWordParts, computeEmbeddedWordParts, computeHereDocBodyParts } from "./parts.ts";
+import {
+  computeWordParts,
+  computeEmbeddedWordParts,
+  computeHereDocBodyParts,
+  wordPartsResolver,
+  embeddedPartsResolver,
+} from "./parts.ts";
+import type { SubstitutionContext } from "./substitution-context.ts";
 import { WordImpl } from "./word.ts";
 import { AssignmentImpl } from "./assignment.ts";
 import { CommandImpl } from "./command.ts";
@@ -55,6 +62,7 @@ import { HereDocBodyImpl } from "./heredoc.ts";
 
 WordImpl._resolveWord = computeWordParts;
 HereDocBodyImpl._resolveParts = computeHereDocBodyParts;
+Lexer._findSubstitutionEnd = findSubstitutionEnd;
 
 function isDeclarationCommand(name: string): boolean {
   switch (name.length) {
@@ -78,19 +86,21 @@ class ArithmeticCommandImpl implements ArithmeticCommand {
   body: string;
   #source: string;
   #depth: number;
+  #context: SubstitutionContext | undefined;
   #expression: ArithmeticExpression | undefined | null = null;
 
-  constructor(pos: number, end: number, body: string, source: string, depth: number) {
+  constructor(pos: number, end: number, body: string, source: string, depth: number, context?: SubstitutionContext) {
     this.pos = pos;
     this.end = end;
     this.body = body;
     this.#source = source;
     this.#depth = depth;
+    this.#context = context;
   }
 
   get expression(): ArithmeticExpression | undefined {
     if (this.#expression === null) {
-      this.#expression = parseArithmeticWithParts(this.body, this.pos + 2, this.#source, this.#depth);
+      this.#expression = parseArithmeticWithParts(this.body, this.pos + 2, this.#source, this.#depth, this.#context);
     }
     return this.#expression;
   }
@@ -122,6 +132,7 @@ class ArithmeticForImpl implements ArithmeticFor {
   #updatePos: number;
   #source: string;
   #depth: number;
+  #context: SubstitutionContext | undefined;
   #initialize: ArithmeticExpression | undefined | null = null;
   #test: ArithmeticExpression | undefined | null = null;
   #update: ArithmeticExpression | undefined | null = null;
@@ -138,6 +149,7 @@ class ArithmeticForImpl implements ArithmeticFor {
     updatePos: number,
     source: string,
     depth: number,
+    context?: SubstitutionContext,
   ) {
     this.pos = pos;
     this.end = end;
@@ -150,12 +162,19 @@ class ArithmeticForImpl implements ArithmeticFor {
     this.#updatePos = updatePos;
     this.#source = source;
     this.#depth = depth;
+    this.#context = context;
   }
 
   get initialize(): ArithmeticExpression | undefined {
     if (this.#initialize === null) {
       if (this.#initStr) {
-        this.#initialize = parseArithmeticWithParts(this.#initStr, this.#initPos, this.#source, this.#depth);
+        this.#initialize = parseArithmeticWithParts(
+          this.#initStr,
+          this.#initPos,
+          this.#source,
+          this.#depth,
+          this.#context,
+        );
       } else {
         this.#initialize = undefined;
       }
@@ -169,7 +188,7 @@ class ArithmeticForImpl implements ArithmeticFor {
   get test(): ArithmeticExpression | undefined {
     if (this.#test === null) {
       if (this.#testStr) {
-        this.#test = parseArithmeticWithParts(this.#testStr, this.#testPos, this.#source, this.#depth);
+        this.#test = parseArithmeticWithParts(this.#testStr, this.#testPos, this.#source, this.#depth, this.#context);
       } else {
         this.#test = undefined;
       }
@@ -183,7 +202,13 @@ class ArithmeticForImpl implements ArithmeticFor {
   get update(): ArithmeticExpression | undefined {
     if (this.#update === null) {
       if (this.#updateStr) {
-        this.#update = parseArithmeticWithParts(this.#updateStr, this.#updatePos, this.#source, this.#depth);
+        this.#update = parseArithmeticWithParts(
+          this.#updateStr,
+          this.#updatePos,
+          this.#source,
+          this.#depth,
+          this.#context,
+        );
       } else {
         this.#update = undefined;
       }
@@ -230,13 +255,14 @@ function parseArithmeticWithParts(
   offset: number,
   source: string,
   depth = 0,
+  context?: SubstitutionContext,
 ): ArithmeticExpression | undefined {
   if (!hasEmbeddedWordStructure(source, offset, offset + body.length)) {
     return parseArithmeticExpression(body, offset) ?? undefined;
   }
   const commandExpansions: import("./internal-types.ts").ArithmeticCommandExpansion[] = [];
   const embeddedWords: import("./internal-types.ts").ArithmeticWord[] = [];
-  const lexer = new Lexer(source);
+  const lexer = new Lexer(source, 0, source.length, false, context);
   const expression =
     parseArithmeticExpression(body, offset, {
       commandExpansions,
@@ -249,10 +275,11 @@ function parseArithmeticWithParts(
     }) ?? undefined;
   for (const node of commandExpansions) {
     if (depth <= MAX_SYNTAX_NESTING) {
-      node.script = parseRegion(source, node.pos + 2, node.end - 1, depth + 1, true);
+      node.script = parseRegion(source, node.pos + 2, node.end - 1, depth + 1, true, lexer.getSubstitutionContext());
     }
   }
-  for (const node of embeddedWords) node.parts = computeEmbeddedWordParts(source, node, depth);
+  for (const node of embeddedWords)
+    node.parts = computeEmbeddedWordParts(source, node, depth, lexer.getSubstitutionContext());
   return expression;
 }
 
@@ -367,8 +394,84 @@ export function parseRegion(
   end: number,
   depth = 0,
   parenBoundary = false,
+  context?: SubstitutionContext,
 ): ParsedScript {
-  return new Parser(source, start, end, depth, parenBoundary).run();
+  return new Parser(source, start, end, depth, parenBoundary, undefined, context).run();
+}
+
+interface SubstitutionBoundary {
+  start: number;
+  end: number;
+  depth: number;
+}
+
+class SubstitutionLexer extends Lexer {
+  private boundaries: Map<number, number | undefined>;
+  private pending: SubstitutionBoundary[];
+  private context: SubstitutionContext;
+
+  constructor(
+    source: string,
+    boundary: SubstitutionBoundary,
+    boundaries: Map<number, number | undefined>,
+    pending: SubstitutionBoundary[],
+    context: SubstitutionContext,
+    parenBoundary = true,
+  ) {
+    super(source, boundary.start, boundary.end, parenBoundary, context);
+    this._nestingDepth = boundary.depth;
+    this.boundaries = boundaries;
+    this.pending = pending;
+    this.context = context;
+  }
+
+  // Keep child boundary requests on this worklist so nested scans stay iterative.
+  fork(start: number, end: number, parenBoundary = false): Lexer {
+    return new SubstitutionLexer(
+      this.getSource(),
+      { start, end, depth: this._nestingDepth },
+      this.boundaries,
+      this.pending,
+      this.context,
+      parenBoundary,
+    );
+  }
+
+  protected findSubstitutionEnd(start: number, end: number, depth = this._nestingDepth + 1): number {
+    const known = this.context.boundaries.get(start);
+    if (known !== undefined) return known <= end ? known : -1;
+    const boundary = this.boundaries.get(start);
+    if (boundary !== undefined) return boundary <= end ? boundary : -1;
+    if (!this.boundaries.has(start)) {
+      this.boundaries.set(start, undefined);
+      this.pending.push({ start, end, depth });
+    }
+    return -1;
+  }
+}
+
+function findSubstitutionEnd(
+  source: string,
+  start: number,
+  end: number,
+  depth: number,
+  context: SubstitutionContext,
+): number {
+  const boundaries = new Map<number, number | undefined>([[start, undefined]]);
+  const pending: SubstitutionBoundary[] = [{ start, end, depth }];
+  // Resolve nested requests before retrying their enclosing boundary, without growing the JavaScript stack.
+  while (pending.length > 0) {
+    const count = pending.length;
+    const boundary = pending[count - 1];
+    const lexer = new SubstitutionLexer(source, boundary, boundaries, pending, context);
+    const found = new Parser(source, boundary.start, boundary.end, boundary.depth, true, lexer).findSubstitutionEnd();
+    if (pending.length === count) {
+      boundaries.set(boundary.start, found);
+      if (found !== -1) context.boundaries.set(boundary.start, found);
+      pending.pop();
+    }
+  }
+  return boundaries.get(start) ?? -1;
 }
 
 class Parser {
@@ -382,8 +485,16 @@ class Parser {
 
   // `depth` counts the substitution scripts (and sub-fields) enclosing this region; it
   // shares the MAX_SYNTAX_NESTING budget with the lexer's lazy word-part materialization.
-  constructor(source: string, start: number, end: number, depth = 0, parenBoundary = false) {
-    this.tok = new Lexer(source, start, end, parenBoundary);
+  constructor(
+    source: string,
+    start: number,
+    end: number,
+    depth = 0,
+    parenBoundary = false,
+    lexer?: Lexer,
+    context?: SubstitutionContext,
+  ) {
+    this.tok = lexer ?? new Lexer(source, start, end, parenBoundary, context);
     this.tok._nestingDepth = depth;
     this.source = source;
     this.start = start;
@@ -440,6 +551,11 @@ class Parser {
 
   private error(message: string, pos: number): void {
     (this.errors ?? (this.errors = [])).push({ message, pos });
+  }
+
+  findSubstitutionEnd(): number {
+    this.list();
+    return this.acceptEnd(Token.RParen);
   }
 
   private skipSemi(): void {
@@ -692,7 +808,14 @@ class Parser {
   // arith_command := (( expr ))
   private arithCommand(): ArithmeticCommand {
     const tok = this.tok.next(LexContext.CommandStart);
-    return new ArithmeticCommandImpl(tok.pos, tok.end, tok.value, this.source, this.depth);
+    return new ArithmeticCommandImpl(
+      tok.pos,
+      tok.end,
+      tok.value,
+      this.source,
+      this.depth,
+      this.tok.getSubstitutionContext(),
+    );
   }
 
   // coproc := COPROC ([name] compound_command [redirections] | simple_command)
@@ -705,8 +828,7 @@ class Parser {
     // Only a compound command can follow a coprocess name. Decide before parsing
     // a simple command so its assignments and reserved words use the actual name.
     if (first.token === Token.Word) {
-      const lookahead = new Lexer(this.source, first.end, this.end);
-      lookahead._nestingDepth = this.depth;
+      const lookahead = this.tok.fork(first.end, this.end);
       switch (lookahead.peek(LexContext.CommandStart).token) {
         case Token.LParen:
           // `name ( )` opens a function definition, not a subshell body after a name.
@@ -924,6 +1046,7 @@ class Parser {
         updatePos,
         this.source,
         this.depth,
+        this.tok.getSubstitutionContext(),
       );
     }
     if (!this.accept(Token.Do, LexContext.CommandStart)) this.error("expected 'do'", this.tok.getPos());
@@ -945,6 +1068,7 @@ class Parser {
         updatePos,
         this.source,
         this.depth,
+        this.tok.getSubstitutionContext(),
       );
     }
 
@@ -966,6 +1090,7 @@ class Parser {
       updatePos,
       this.source,
       this.depth,
+      this.tok.getSubstitutionContext(),
     );
   }
 
@@ -1255,7 +1380,7 @@ class Parser {
           token.pos,
           token.end,
           this.source,
-          computeEmbeddedWordParts,
+          embeddedPartsResolver(this.tok.getSubstitutionContext()),
           this.depth,
         );
       } else {
@@ -1403,7 +1528,7 @@ class Parser {
               quoted: t.delimiterQuoted,
             }
           : undefined,
-        body: new HereDocBodyImpl(this.source, tEnd, t.delimiterQuoted, this.depth),
+        body: new HereDocBodyImpl(this.source, tEnd, t.delimiterQuoted, this.depth, this.tok.getSubstitutionContext()),
         closing: undefined,
       };
       if (hasTarget) this.tok.registerHereDocTarget(r);
@@ -1415,7 +1540,7 @@ class Parser {
           t.targetPos,
           t.targetEnd,
           this.source,
-          undefined,
+          wordPartsResolver(this.tok.getSubstitutionContext()),
           this.depth,
         )
       : undefined;
@@ -1439,17 +1564,39 @@ class Parser {
     const text = tok.raw ? tok.value : this.source.slice(tok.pos, tok.end);
     // Raw keyword-eligible words have no quotes or expansions to resolve.
     const source = tok.raw && tok.keywordEligible ? undefined : this.source;
-    return new WordImpl(text, tok.pos, tok.end, source, undefined, this.depth);
+    return new WordImpl(
+      text,
+      tok.pos,
+      tok.end,
+      source,
+      source === undefined ? undefined : wordPartsResolver(this.tok.getSubstitutionContext()),
+      this.depth,
+    );
   }
 
   private toWordFromPosEnd(tok: TokenValue, pos: number, end: number): Word {
     if (tok.pos === pos && tok.end === end) return this.toWord(tok);
-    return new WordImpl(this.source.slice(pos, end), pos, end, this.source, undefined, this.depth);
+    return new WordImpl(
+      this.source.slice(pos, end),
+      pos,
+      end,
+      this.source,
+      wordPartsResolver(this.tok.getSubstitutionContext()),
+      this.depth,
+    );
   }
 
   private parseAssignment(token: TokenValue): Assignment {
     const text = token.raw ? token.value : this.source.slice(token.pos, token.end);
-    return new AssignmentImpl(text, token.pos, token.end, this.source, token.assignmentOperatorPos, this.depth);
+    return new AssignmentImpl(
+      text,
+      token.pos,
+      token.end,
+      this.source,
+      token.assignmentOperatorPos,
+      this.depth,
+      this.tok.getSubstitutionContext(),
+    );
   }
 
   private makeCompoundList(commands: Statement[]): CompoundList {

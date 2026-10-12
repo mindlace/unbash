@@ -1,7 +1,8 @@
 import { Lexer, LexContext, skipLineContinuations, Token } from "./lexer.ts";
-import { computeArrayElementParts, computeEmbeddedWordParts } from "./parts.ts";
+import { arrayPartsResolver, embeddedPartsResolver, wordPartsResolver } from "./parts.ts";
 import type { ArrayValue, Assignment, Word } from "./internal-types.ts";
 import { WordImpl } from "./word.ts";
+import type { SubstitutionContext } from "./substitution-context.ts";
 
 class ArrayValueImpl implements ArrayValue {
   type = "ArrayValue" as const;
@@ -9,26 +10,31 @@ class ArrayValueImpl implements ArrayValue {
   end: number;
   #source: string;
   #depth: number;
+  #context: SubstitutionContext | undefined;
   #elements: Word[] | undefined;
 
-  constructor(source: string, pos: number, end: number, depth: number) {
+  constructor(source: string, pos: number, end: number, depth: number, context?: SubstitutionContext) {
     this.pos = pos;
     this.end = end;
     this.#source = source;
     this.#depth = depth;
+    this.#context = context;
   }
 
   get elements(): Word[] {
     if (this.#elements) return this.#elements;
-    const lexer = new Lexer(this.#source, this.pos + 1, this.end - 1);
+    const lexer = new Lexer(this.#source, this.pos + 1, this.end - 1, false, this.#context);
     lexer._nestingDepth = this.#depth;
     const elements: Word[] = [];
     while (lexer.peek(LexContext.ArrayElement).token !== Token.EOF) {
       const token = lexer.next(LexContext.ArrayElement);
       if (token.token !== Token.Word && token.token !== Token.Assignment) continue;
       const text = token.raw ? token.value : this.#source.slice(token.pos, token.end);
-      const resolver = text.charCodeAt(0) === 91 ? computeArrayElementParts : undefined;
-      const source = resolver === undefined && token.raw && token.keywordEligible ? undefined : this.#source;
+      const indexed = text.charCodeAt(0) === 91;
+      const context = lexer.getSubstitutionContext();
+      const source = !indexed && token.raw && token.keywordEligible ? undefined : this.#source;
+      const resolver =
+        source === undefined ? undefined : indexed ? arrayPartsResolver(context) : wordPartsResolver(context);
       elements.push(new WordImpl(text, token.pos, token.end, source, resolver, this.#depth));
     }
     this.#elements = elements;
@@ -47,19 +53,29 @@ export class AssignmentImpl implements Assignment {
   text: string;
   #source: string;
   #depth: number;
+  #context: SubstitutionContext | undefined;
   #operatorPos: number;
   #name: string | null = null;
   #append: boolean | undefined;
   #index: Word | undefined;
   #value: Word | ArrayValue | null = null;
 
-  constructor(text: string, pos: number, end: number, source: string, operatorPos: number, depth: number) {
+  constructor(
+    text: string,
+    pos: number,
+    end: number,
+    source: string,
+    operatorPos: number,
+    depth: number,
+    context?: SubstitutionContext,
+  ) {
     this.pos = pos;
     this.end = end;
     this.text = text;
     this.#source = source;
     this.#operatorPos = operatorPos;
     this.#depth = depth;
+    this.#context = context;
   }
 
   get name(): string {
@@ -82,8 +98,15 @@ export class AssignmentImpl implements Assignment {
     const arrayStart = skipLineContinuations(this.#source, start, this.end);
     this.#value =
       this.#source.charCodeAt(arrayStart) === 40 && this.#source.charCodeAt(this.end - 1) === 41
-        ? new ArrayValueImpl(this.#source, arrayStart, this.end, this.#depth)
-        : new WordImpl(this.#source.slice(start, this.end), start, this.end, this.#source, undefined, this.#depth);
+        ? new ArrayValueImpl(this.#source, arrayStart, this.end, this.#depth, this.#context)
+        : new WordImpl(
+            this.#source.slice(start, this.end),
+            start,
+            this.end,
+            this.#source,
+            wordPartsResolver(this.#context),
+            this.#depth,
+          );
     return this.#value;
   }
 
@@ -108,7 +131,7 @@ export class AssignmentImpl implements Assignment {
           start,
           end,
           this.#source,
-          computeEmbeddedWordParts,
+          embeddedPartsResolver(this.#context),
           this.#depth,
         );
         nameEnd = bracket;
