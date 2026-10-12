@@ -21,6 +21,7 @@ Example use cases:
 - Classify scripts for permission prompts, allowlists, or audit findings
 - Collect executables and literal file, configuration, and dependency references
 - Import or convert commands such as `curl` to code
+- Build a shell portability checker using parse errors and AST analysis
 - Attach diagnostics to generated or pasted Bash using source-positioned errors
   and partial trees
 - Build explanations, visualizations, or structured previews of pipelines,
@@ -39,15 +40,15 @@ version (i.e. it accepts syntax that older Bash releases reject).
 ## Unsupported syntax
 
 Other shell languages are not supported: zsh, ksh93, mksh, fish, PowerShell,
-`cmd.exe` or csh, Bats test files. Their scripts may produce errors or a
-misleading tree.
+`cmd.exe`, csh, Bats test files. Such scripts may produce errors or a misleading
+tree.
 
 unbash is a tolerant parser: for malformed or incomplete input, it recovers
 where possible and returns a best-effort partial AST with source-positioned
 errors.
 
-To parse `process.argv` (`string[]`), use Node.js [`parseArgs`][4] or a CLI
-library such as [yargs][5] or [citty][6].
+To parse `process.argv` (`string[]`), use Node.js [`parseArgs`][4] or a library
+such as [yargs][5] or [citty][6].
 
 ## Usage
 
@@ -128,7 +129,9 @@ verbatim nested substitutions share the caller's source, so their ranges slice
 that source directly:
 
 ```js
-const nested = word.parts.find((part) => part.type === "CommandExpansion").script;
+const nested = word.parts.find(
+  (part) => part.type === "CommandExpansion",
+).script;
 const command = nested.commands[0].command;
 
 source.slice(command.pos, command.end); // exact nested command source
@@ -244,7 +247,7 @@ pnpm bench
 
 ## Size
 
-The parser bundle is 85KiB minified and 21KiB gzipped.
+The parser bundle is 85K minified and 21K gzipped.
 
 ## Playgrounds
 
