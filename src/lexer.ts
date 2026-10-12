@@ -547,30 +547,6 @@ export const LexContext = {
 } as const;
 export type LexContext = (typeof LexContext)[keyof typeof LexContext];
 
-function scanBraceExpansion(src: string, pos: number, len: number): number {
-  const nextCh = pos + 1 < len ? src.charCodeAt(pos + 1) : 0;
-  if (nextCh <= CH_SPACE || nextCh === CH_RBRACE) return -1;
-  let depth = 1;
-  let hasSep = false;
-  let scanPos = pos + 1;
-  while (scanPos < len && depth > 0) {
-    const bc = src.charCodeAt(scanPos);
-    if (bc === CH_LBRACE) depth++;
-    else if (bc === CH_RBRACE) {
-      if (--depth === 0) break;
-    } else if (bc <= CH_SPACE || bc === CH_SEMI || bc === CH_PIPE || bc === CH_AMP) return -1;
-    else if (
-      depth === 1 &&
-      (bc === 0x2c /* , */ || (bc === 0x2e /* . */ && scanPos + 1 < len && src.charCodeAt(scanPos + 1) === 0x2e))
-    )
-      hasSep = true;
-    if (bc === CH_BACKSLASH) scanPos++;
-    scanPos++;
-  }
-  if (depth === 0 && hasSep) return scanPos + 1;
-  return -1;
-}
-
 export class Lexer {
   static _findSubstitutionEnd:
     | ((source: string, start: number, end: number, depth: number, context: SubstitutionContext) => number)
@@ -901,6 +877,86 @@ export class Lexer {
     this.srcEnd = savedEnd;
     this._unbalanced = savedUnbalanced;
     return -1;
+  }
+
+  // End of the brace expansion opened at `start`, or -1. As in Bash's brace_gobbler, quotes,
+  // escapes, parameter expansions and substitutions are opaque; an unquoted metacharacter
+  // ends the word before the brace closes. The word scan reports errors in the skipped text.
+  private scanBraceExpansion(start: number): number {
+    const src = this.src;
+    const len = this.srcEnd;
+    const first = start + 1 < len ? src.charCodeAt(start + 1) : 0;
+    if (first <= CH_SPACE || first === CH_RBRACE) return -1;
+    const savedPos = this.pos;
+    const savedUnbalanced = this._unbalanced;
+    const errorCount = this._errors === null ? 0 : this._errors.length;
+    let depth = 1;
+    let hasSep = false;
+    let end = -1;
+    let pos = start + 1;
+    while (pos < len) {
+      const ch = src.charCodeAt(pos);
+      const type = ch < 128 ? charType[ch] : 0;
+      if (type === 0) {
+        pos++;
+        if (ch === CH_RBRACE) {
+          if (--depth === 0) {
+            end = pos;
+            break;
+          }
+        } else if (depth === 1 && (ch === 0x2c /* , */ || (ch === 0x2e /* . */ && src.charCodeAt(pos) === 0x2e))) {
+          hasSep = true;
+        }
+        continue;
+      }
+      const next = pos + 1 < len ? src.charCodeAt(pos + 1) : 0;
+      if (type & 1) {
+        if (next === CH_LPAREN && (ch === CH_LT || ch === CH_GT)) {
+          this.pos = pos + 2;
+          this.extractBalanced();
+          pos = this.pos;
+        } else if (ch === CH_LPAREN && isExtglobOpen(src.charCodeAt(pos - 1))) {
+          const close = this.findClosingShellDelimiter(pos + 1, len, CH_RPAREN);
+          if (close === -1) break;
+          pos = close + 1;
+        } else {
+          break;
+        }
+      } else if (ch === CH_BACKSLASH) {
+        pos += 2;
+      } else if (ch === CH_SQUOTE) {
+        this.pos = pos + 1;
+        this.skipSQ();
+        pos = this.pos;
+      } else if (ch === CH_DQUOTE) {
+        this.pos = pos + 1;
+        this.skipDQ();
+        pos = this.pos;
+      } else if (ch === CH_BACKTICK) {
+        pos++;
+        while (pos < len && src.charCodeAt(pos) !== CH_BACKTICK) pos += src.charCodeAt(pos) === CH_BACKSLASH ? 2 : 1;
+        pos++;
+      } else if (ch === CH_LBRACE) {
+        depth++;
+        pos++;
+      } else if (next === CH_SQUOTE) {
+        pos = decodeAnsiCQuoted(src, pos + 2, len).end;
+      } else if (next === CH_LBRACE) {
+        const close = this.findClosingBrace(pos + 2, len);
+        if (close === -1) break;
+        pos = close + 1;
+      } else if (next === CH_LPAREN) {
+        this.pos = pos + 2;
+        this.extractBalanced();
+        pos = this.pos;
+      } else {
+        pos++;
+      }
+    }
+    this.pos = savedPos;
+    this._unbalanced = savedUnbalanced;
+    if (this._errors !== null) this._errors.length = errorCount;
+    return hasSep ? end : -1;
   }
 
   skipSubshellBody(): number {
@@ -2507,7 +2563,7 @@ export class Lexer {
 
       if (ch === CH_LBRACE) {
         if (assignmentState >= 0 && assignmentState < ASSIGNMENT_INDEX_BASE) assignmentState = ASSIGNMENT_INVALID;
-        const braceEnd = scanBraceExpansion(src, pos, len);
+        const braceEnd = this.scanBraceExpansion(pos);
         if (braceEnd > 0) {
           keywordEligible = false;
           lastValueChar = src.charCodeAt(braceEnd - 1);

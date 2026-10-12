@@ -104,3 +104,42 @@ test("process substitutions inside brace expansions remain structured", () => {
   assert.equal(command?.type, "Command");
   if (command?.type === "Command") assert.equal(command.name?.value, "danger");
 });
+
+test("brace expansion skips quotes and substitutions like Bash", () => {
+  const braceTexts = (src: string) => {
+    const ast = parse(src);
+    assert.equal(ast.errors, undefined, src);
+    const parts = wp(src, nodeOfType(getCmd(ast).suffix[0], "Word")) ?? [];
+    return parts.flatMap((part) => (part.type === "BraceExpansion" ? [part.text] : []));
+  };
+  for (const [word, braces] of [
+    ['{a,"b c"}', true],
+    ["{a,'b c'}", true],
+    ["{a,$'b c'}", true],
+    ["{a,$(echo x)}", true],
+    ["{a,$(echo b,c)}", true],
+    ["{a,${x:-b c}}", true],
+    ["{a,`echo b c`}", true],
+    ["{a,$((1 + 2))}", true],
+    ['{a,b"}"}', true],
+    ["{a,@(b|c)}", true],
+    ["{a,${x/,/y}}", true],
+    ['{"a,b"}', false],
+    ["{a\\,b}", false],
+    ["{$(echo a,b)}", false],
+    ["{${x/,/y}}", false],
+  ] as const) {
+    assert.deepEqual(braceTexts(`echo ${word}`), braces ? [word] : [], word);
+  }
+});
+
+test("a metacharacter inside braces ends the word before the brace closes", () => {
+  const command = getCmd(parse("echo {a,b>out}"));
+  assert.deepEqual(
+    command.suffix.map((item) => [item.type, item.type === "Word" ? item.text : undefined]),
+    [
+      ["Word", "{a,b"],
+      ["Redirect", undefined],
+    ],
+  );
+});
