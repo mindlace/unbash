@@ -68,6 +68,15 @@ test("${var:-default}", () => {
   assert.equal(getOperand(p)!.text, "default");
 });
 
+test("extquote stays enabled inside double-quoted parameter operands", () => {
+  const ast = parse("shopt -u extquote; echo \"${x:-$'a\\tb'}\"");
+  assert.equal(ast.errors, undefined);
+  const word = nodeOfType(getCmd(ast, 1).suffix[0], "Word");
+  const operand = getOperand(getQuotedParam(word))!;
+  assert.equal(operand.value, "a\tb");
+  assert.deepEqual(operand.parts, [{ type: "AnsiCQuoted", pos: 30, end: 37, text: "$'a\\tb'", value: "a\tb" }]);
+});
+
 test("ANSI-C \\c operand ends where the skip and decode paths agree", () => {
   const src = "echo ${u:-$'\\c'} x";
   const c = getCmd(parse(src));

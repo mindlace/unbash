@@ -2,7 +2,7 @@ import { nodeOfType, redirectsOf } from "./ast-helpers.ts";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { parse } from "../src/parser.ts";
-import { Token, Lexer } from "../src/lexer.ts";
+import { Token, Lexer, LexContext } from "../src/lexer.ts";
 
 // Helpers
 const tokens = (src: string) => {
@@ -17,6 +17,18 @@ const tokens = (src: string) => {
 };
 
 const getCmd = (ast: ReturnType<typeof parse>, i = 0) => nodeOfType(ast.commands[i].command, "Command");
+
+test("case patterns reserve only an unquoted esac", () => {
+  for (const source of ["if", "for", "!", "[[", "]]", "a=b", "a[1]=b", "'esac'", '"esac"', "\\esac", "i\\\nf"]) {
+    const token = new Lexer(source).next(LexContext.CasePattern);
+    assert.equal(token.token, Token.Word, source);
+  }
+  for (const source of ["esac", "es\\\nac", "e\\\n\\\n\\\n\\\n\\\n\\\n\\\nsac"]) {
+    const token = new Lexer(source).next(LexContext.CasePattern);
+    assert.equal(token.token, Token.Esac, source);
+    assert.equal(token.value, "esac", source);
+  }
+});
 
 // ── Operator disambiguation ─────────────────────────────────────────
 

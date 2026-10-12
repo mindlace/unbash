@@ -1015,7 +1015,7 @@ class Parser {
     this.skipNewlines(LexContext.CommandStart);
     if (!this.accept(Token.In, LexContext.CommandStart))
       this.error("expected 'in' after 'case' word", this.tok.getPos());
-    this.skipNewlines(LexContext.CommandStart);
+    this.skipNewlines(LexContext.CasePattern);
 
     if (this.syntaxDepth === MAX_SYNTAX_NESTING) {
       this.error("maximum case nesting depth exceeded", pos);
@@ -1027,7 +1027,7 @@ class Parser {
 
     this.syntaxDepth++;
     const items: CaseItem[] = [];
-    let t = this.tok.peek(LexContext.CommandStart).token;
+    let t = this.tok.peek(LexContext.CasePattern).token;
     while (t !== Token.Esac && t !== Token.EOF) {
       const itemPos = this.tok.peek(LexContext.Normal).pos;
       this.accept(Token.LParen, LexContext.Normal);
@@ -1064,8 +1064,8 @@ class Parser {
         item.end = termTok.end;
       }
       items.push(item);
-      this.skipNewlines(LexContext.CommandStart);
-      t = this.tok.peek(LexContext.CommandStart).token;
+      this.skipNewlines(LexContext.CasePattern);
+      t = this.tok.peek(LexContext.CasePattern).token;
     }
     const closeEnd = this.acceptEnd(Token.Esac, LexContext.CommandStart);
     if (closeEnd < 0) this.error("expected 'esac' to close 'case'", this.tok.getPos());
@@ -1280,7 +1280,7 @@ class Parser {
   // function_def with 'function' keyword
   private functionDef(): Function {
     const pos = this.tok.next(LexContext.CommandStart).pos;
-    const name = this.readWord(LexContext.Normal);
+    const name = this.readWord(LexContext.FunctionName);
     let body: Function["body"];
     if (this.tok.peek(LexContext.CommandStart).token === Token.LParen) {
       const openPos = this.tok.next(LexContext.CommandStart).pos;

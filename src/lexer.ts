@@ -231,6 +231,16 @@ export function skipLineContinuations(source: string, pos: number, end: number):
   return pos;
 }
 
+function skipBlanks(source: string, pos: number, end: number): number {
+  while (pos < end) {
+    const ch = source.charCodeAt(pos);
+    if (ch === CH_SPACE || ch === CH_TAB) pos++;
+    else if (ch === CH_BACKSLASH && pos + 1 < end && source.charCodeAt(pos + 1) === CH_NL) pos += 2;
+    else break;
+  }
+  return pos;
+}
+
 const arithmeticWordDelimiter = new Uint8Array(128);
 for (const ch of [
   CH_TAB,
@@ -524,6 +534,8 @@ export const LexContext = {
   // Assignment arguments retain ordinary word boundaries inside subscripts.
   Declaration: 4,
   ArrayElement: 5,
+  FunctionName: 6,
+  CasePattern: 7,
 } as const;
 export type LexContext = (typeof LexContext)[keyof typeof LexContext];
 
@@ -863,7 +875,11 @@ export class Lexer {
     let commandStart = true;
 
     for (;;) {
-      const value = this.next(commandStart ? LexContext.CommandStart : LexContext.Normal);
+      const phase = frames[frames.length - 1].phase;
+      let ctx: LexContext = commandStart ? LexContext.CommandStart : LexContext.Normal;
+      if (phase === "function-name") ctx = LexContext.FunctionName;
+      else if (phase === "case-pattern" && commandStart) ctx = LexContext.CasePattern;
+      const value = this.next(ctx);
       const token = value.token;
       if (token === Token.EOF) return -1;
 
@@ -1425,24 +1441,9 @@ export class Lexer {
     const src = this.src;
     const len = this.srcEnd;
 
-    // Skip spaces and tabs (inlined for hot path)
-    let pos = this.pos;
-    while (pos < len) {
-      const ch = src.charCodeAt(pos);
-      if (ch === CH_SPACE || ch === CH_TAB) {
-        pos++;
-        continue;
-      }
-      if (ch === CH_BACKSLASH && pos + 1 < len && src.charCodeAt(pos + 1) === CH_NL) {
-        pos += 2;
-        continue;
-      }
-      // Inside [[ ]], newlines are whitespace
-      if (ch === CH_NL && ctx === LexContext.TestMode) {
-        pos++;
-        continue;
-      }
-      break;
+    let pos = skipBlanks(src, this.pos, len);
+    if (ctx === LexContext.TestMode) {
+      while (pos < len && src.charCodeAt(pos) === CH_NL) pos = skipBlanks(src, pos + 1, len);
     }
     this.pos = pos;
 
@@ -1905,7 +1906,7 @@ export class Lexer {
   private _hereQuoted = false;
 
   private readWord(out: TokenValue, ctx: LexContext, tokenStart: number = 0): void {
-    this.readWordText();
+    this.readWordText(false, ctx);
     if (ctx === LexContext.Normal) {
       const next = this.pos < this.srcEnd ? this.src.charCodeAt(this.pos) : 0;
       if (!this._wordRaw || (next !== CH_LT && next !== CH_GT)) {
@@ -1950,6 +1951,19 @@ export class Lexer {
     let assignmentOpPos = this._wordAssignmentOperatorPos;
     const wordEnd = this.pos;
     const wordLen = wordEnd - tokenStart;
+
+    if (ctx === LexContext.CasePattern) {
+      let token: Token = Token.Word;
+      if (keywordEligible) {
+        const reserved = raw
+          ? matchReservedWord(src, tokenStart, wordLen)
+          : RESERVED_WORDS.get(this.wordValueOf(tokenStart, wordEnd));
+        if (reserved === Token.Esac) token = reserved;
+      }
+      setSpanToken(out, token, tokenStart, wordEnd, raw);
+      out.keywordEligible = keywordEligible;
+      return;
+    }
 
     // Only keyword classification needs a non-raw word's processed value.
     let value: string | null = null;
@@ -2084,7 +2098,7 @@ export class Lexer {
 
   // `subscripts` re-reads a word known to stop inside an array subscript, where
   // metacharacters are ordinary text.
-  private readWordText(subscripts = false): void {
+  private readWordText(subscripts = false, ctx: LexContext = LexContext.Normal): void {
     const src = this.src;
     const len = this.srcEnd;
     let pos = this.pos;
@@ -2163,11 +2177,27 @@ export class Lexer {
 
       if (charType[ch] & 1) {
         if (ch === CH_LPAREN && lastValueChar < 128 && extglobPrefix[lastValueChar]) {
-          keywordEligible = false;
+          if (ctx === LexContext.FunctionName) break;
+          // Default Bash command syntax takes precedence over the extglob extension.
+          if (
+            ctx === LexContext.CommandStart &&
+            lastValueChar === CH_BANG &&
+            keywordEligible &&
+            src.charCodeAt(fastStart) === CH_BANG &&
+            skipLineContinuations(src, fastStart + 1, len) === pos
+          )
+            break;
           const prefixChar = lastValueChar;
-          pos++;
-          const innerStart = pos;
+          const innerStart = pos + 1;
           const close = this.findClosingShellDelimiter(innerStart, len, CH_RPAREN, prefixChar === CH_EQ);
+          if (
+            ctx === LexContext.CommandStart &&
+            prefixChar !== CH_EQ &&
+            close !== -1 &&
+            skipBlanks(src, innerStart, close) === close
+          )
+            break;
+          keywordEligible = false;
           const patternEnd = close === -1 ? len : close;
           pos = close === -1 ? len : close + 1;
           if (close === -1) this.errors.push({ message: "unterminated extended glob", pos: innerStart - 2 });
@@ -2774,14 +2804,7 @@ export class Lexer {
   }
 
   private skipSpacesAndTabs(): void {
-    const src = this.src;
-    const len = this.srcEnd;
-    while (this.pos < len) {
-      const ch = src.charCodeAt(this.pos);
-      if (ch === CH_SPACE || ch === CH_TAB) this.pos++;
-      else if (ch === CH_BACKSLASH && this.pos + 1 < len && src.charCodeAt(this.pos + 1) === CH_NL) this.pos += 2;
-      else break;
-    }
+    this.pos = skipBlanks(this.src, this.pos, this.srcEnd);
   }
 
   private readDoubleQuoted(): void {
