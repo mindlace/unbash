@@ -230,13 +230,13 @@ with Node.js 24.19.0. Parentheses show speed relative to unbash v5.
 
 | Parser                       | short (1.1KiB) | advanced (0.9KiB) | medium (150KiB) | large (970KiB) |
 | ---------------------------- | -------------: | ----------------: | --------------: | -------------: |
-| **unbash v5**                |       **73.6** |          **73.0** |       **104.1** |      **123.9** |
-| unbash v4                    |   79.2 (0.93x) |      71.3 (1.02x) |    96.5 (1.08x) |  100.7 (1.23x) |
-| tree-sitter-bash (native)    |     4.58 (16x) |        6.47 (11x) |      15.00 (7x) |    11.88 (10x) |
-| tree-sitter-bash (WASM)      |     4.96 (15x) |        5.61 (13x) |      8.78 (12x) |     8.21 (15x) |
-| sh-syntax                    |   0.03 (2268x) |      0.04 (1728x) |      8.26 (13x) |     14.02 (9x) |
-| bash-parser                  |    0.26 (278x) |               n/a |             n/a |            n/a |
-| @ericcornelissen/bash-parser |    0.26 (288x) |               n/a |             n/a |            n/a |
+| **unbash v5**                |       **77.3** |          **70.3** |       **101.5** |      **117.6** |
+| unbash v4                    |   79.2 (0.98x) |      71.3 (0.99x) |    97.9 (1.04x) |  116.0 (1.01x) |
+| tree-sitter-bash (native)    |     4.59 (17x) |        6.51 (11x) |      15.08 (7x) |    11.90 (10x) |
+| tree-sitter-bash (WASM)      |     5.02 (15x) |        5.61 (13x) |      8.85 (11x) |     8.27 (14x) |
+| sh-syntax                    |   0.03 (2290x) |      0.04 (1659x) |      8.28 (12x) |     14.06 (8x) |
+| bash-parser                  |    0.27 (290x) |               n/a |             n/a |            n/a |
+| @ericcornelissen/bash-parser |    0.26 (301x) |               n/a |             n/a |            n/a |
 
 Run the benchmarks using Node.js 24+:
 
