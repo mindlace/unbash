@@ -69,6 +69,39 @@ test("only leading unquoted brackets group compound array words", () => {
   }
 });
 
+test("array bodies report operators and parentheses outside words (Bash 5.3 rejects them)", () => {
+  for (const [source, pos] of [
+    ["a=( 1 & 2 )", 6],
+    ["a=(\n1\n&\n'2 3'\n)", 6],
+    ["a=( 1 ; 2 )", 6],
+    ["a=( 1 | 2 )", 6],
+    ["a=( 1 && 2 )", 6],
+    ["a=( >x )", 4],
+    ["a=( x[;] )", 6],
+    ["a=( (1) )", 4],
+    ["a=( inside=() )", 11],
+    ["declare -A m=([k]=(1))", 18],
+  ] as const) {
+    assert.deepEqual(
+      parse(source).errors,
+      [{ message: `unexpected '${source[pos]}' in array assignment`, pos }],
+      JSON.stringify(source),
+    );
+  }
+  for (const source of [
+    "a=([x;y]=1)",
+    "declare -A m=([a&b]=1)",
+    "a=([x)]=1)",
+    "a=( [abc] )",
+    "a=( @(a|b) !(x) )",
+    'a=( $(echo a;b) "a;b" a\\;b `echo a;b` ${x//;/,} )',
+    "a=(\n# c ; & |\n1 )",
+    "a=( <(true) x<(y) )",
+  ]) {
+    assert.equal(parse(source).errors, undefined, JSON.stringify(source));
+  }
+});
+
 test("assignment values have one scalar or array owner", () => {
   const script = parse("x=one; declare a=(one 'two words')");
   const scalar = script.commands[0].command;

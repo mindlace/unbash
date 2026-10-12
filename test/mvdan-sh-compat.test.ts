@@ -13,6 +13,8 @@ const knownInvalidInputs = new Set([
   "( )",
   "while; do exit; done",
   "while false; do; done",
+  // A leading `[` in a Bash array body opens a subscript that must close.
+  "foo=([)",
   // `;|` is a MirBSD Korn shell and Zsh case terminator.
   "case i in 1) a ;| 2) b ;; esac",
   "select foo bar",

@@ -365,6 +365,11 @@ extglobPrefix[CH_PLUS] = 1;
 extglobPrefix[CH_BANG] = 1;
 extglobPrefix[CH_EQ] = 1;
 
+// `=(` opens an array value, not a pattern.
+function isExtglobOpen(prefix: number): boolean {
+  return prefix < 128 && prefix !== CH_EQ && extglobPrefix[prefix] === 1;
+}
+
 const extglobOp: Record<number, ExtGlobOperator> = {
   [CH_QUESTION]: "?",
   [CH_AT]: "@",
@@ -781,15 +786,9 @@ export class Lexer {
     return this.pos;
   }
 
-  // Only array assignment bodies take comments; extglob shares this scanner, and `#` is
-  // pattern data there.
-  private findClosingShellDelimiter(
-    start: number,
-    end: number,
-    closing: number,
-    comments = false,
-    braces = true,
-  ): number {
+  // Only array assignment bodies take comments and leading `[` subscripts and reject operators;
+  // extglob shares this scanner, and `#` is pattern data there.
+  private findClosingShellDelimiter(start: number, end: number, closing: number, array = false, braces = true): number {
     const savedPos = this.pos;
     const savedEnd = this.srcEnd;
     const savedUnbalanced = this._unbalanced;
@@ -797,6 +796,7 @@ export class Lexer {
     const delimiters = [closing];
     let pos = start;
     let wordStart = true;
+    let invalid = -1;
 
     while (pos < this.srcEnd) {
       const ch = this.src.charCodeAt(pos);
@@ -805,7 +805,7 @@ export class Lexer {
         pos += 2;
         continue;
       }
-      if (ch === CH_HASH && comments && delimiters.length === 1 && wordStart) {
+      if (ch === CH_HASH && array && delimiters.length === 1 && wordStart) {
         while (pos < this.srcEnd && this.src.charCodeAt(pos) !== CH_NL) pos++;
         continue;
       }
@@ -858,6 +858,21 @@ export class Lexer {
           continue;
         }
       }
+      if (array && delimiters.length === 1) {
+        if (ch === CH_LBRACKET && wordStart) {
+          delimiters.push(CH_RBRACKET);
+        } else if (
+          invalid === -1 &&
+          (ch === CH_SEMI ||
+            ch === CH_AMP ||
+            ch === CH_PIPE ||
+            ch === CH_LT ||
+            ch === CH_GT ||
+            (ch === CH_LPAREN && !isExtglobOpen(this.src.charCodeAt(pos - 1))))
+        ) {
+          invalid = pos;
+        }
+      }
       if (expected === CH_RBRACKET && ch === CH_LBRACKET) {
         delimiters.push(CH_RBRACKET);
       } else if (expected === CH_RPAREN && ch === CH_LPAREN) {
@@ -868,6 +883,8 @@ export class Lexer {
           this.pos = savedPos;
           this.srcEnd = savedEnd;
           this._unbalanced = savedUnbalanced;
+          if (invalid !== -1)
+            this.errors.push({ message: `unexpected '${this.src[invalid]}' in array assignment`, pos: invalid });
           return pos;
         }
         wordStart = false;
