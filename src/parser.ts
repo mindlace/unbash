@@ -517,7 +517,7 @@ class Parser {
       const unexpected = this.tok.peek(LexContext.CommandStart);
       if (unexpected.token === Token.EOF) break;
 
-      this.error(`unexpected token '${unexpected.value}'`, unexpected.pos);
+      this.unexpectedToken(unexpected);
       // `In` cannot join `listTerminators`: `list()` shares it, and `in` must not terminate a
       // list inside `for`/`case`.
       if (!listTerminators[unexpected.token] && unexpected.token !== Token.In) break;
@@ -551,6 +551,10 @@ class Parser {
 
   private error(message: string, pos: number): void {
     (this.errors ?? (this.errors = [])).push({ message, pos });
+  }
+
+  private unexpectedToken(t: TokenValue): void {
+    this.error(`unexpected token '${t.token === Token.Newline ? "newline" : t.value}'`, t.pos);
   }
 
   findSubstitutionEnd(): number {
@@ -1011,7 +1015,7 @@ class Parser {
       return this.cStyleFor(pos);
     }
 
-    const name = this.readWord(LexContext.Normal);
+    const name = this.readRequiredWord("for");
     let wordlist: Word[] | undefined;
     this.skipNewlines(LexContext.CommandStart);
     if (this.tok.peek(LexContext.CommandStart).token === Token.In) {
@@ -1162,7 +1166,7 @@ class Parser {
   // case_clause := CASE word IN (pattern) list (;; | ;& | ;;&) ... ESAC
   private caseClause(): Case {
     const pos = this.tok.next(LexContext.CommandStart).pos;
-    const word = this.readWord(LexContext.Normal);
+    const word = this.readRequiredWord("case");
     this.skipNewlines(LexContext.CommandStart);
     if (!this.accept(Token.In, LexContext.CommandStart))
       this.error("expected 'in' after 'case' word", this.tok.getPos());
@@ -1178,16 +1182,30 @@ class Parser {
 
     this.syntaxDepth++;
     const items: CaseItem[] = [];
+    // Report only the first grammar error: recovery below would repeat it.
+    let invalid = false;
     let t = this.tok.peek(LexContext.CasePattern).token;
     while (t !== Token.Esac && t !== Token.EOF) {
       const itemPos = this.tok.peek(LexContext.Normal).pos;
       this.accept(Token.LParen, LexContext.Normal);
+      // pattern := word ('|' word)*
       const pattern: Word[] = [];
-      t = this.tok.peek(LexContext.Normal).token;
-      while (t !== Token.RParen && t !== Token.EOF) {
-        if (t !== Token.Pipe) pattern.push(this.toWord(this.tok.next(LexContext.Normal)));
-        else this.tok.next(LexContext.Normal);
-        t = this.tok.peek(LexContext.Normal).token;
+      let expectWord = true;
+      let next = this.tok.peek(LexContext.Normal);
+      while (next.token !== Token.RParen && next.token !== Token.EOF) {
+        const valid = next.token === (expectWord ? Token.Word : Token.Pipe);
+        if (valid) expectWord = !expectWord;
+        else if (!invalid) {
+          this.unexpectedToken(next);
+          invalid = true;
+        }
+        const tok = this.tok.next(LexContext.Normal);
+        if (tok.token === Token.Word) pattern.push(this.toWord(tok));
+        next = this.tok.peek(LexContext.Normal);
+      }
+      if (expectWord && next.token === Token.RParen && !invalid) {
+        this.unexpectedToken(next);
+        invalid = true;
       }
       const rparenEnd = this.acceptEnd(Token.RParen, LexContext.Normal);
 
@@ -1208,11 +1226,15 @@ class Parser {
         terminator: undefined,
       };
 
-      t = this.tok.peek(LexContext.CommandStart).token;
+      const after = this.tok.peek(LexContext.CommandStart);
+      t = after.token;
       if (t === Token.DoubleSemi || t === Token.SemiAmp || t === Token.DoubleSemiAmp) {
         const termTok = this.tok.next(LexContext.CommandStart);
         item.terminator = CASE_TERMINATORS[termTok.token];
         item.end = termTok.end;
+      } else if (t !== Token.Esac && t !== Token.EOF && !invalid) {
+        this.unexpectedToken(after);
+        invalid = true;
       }
       items.push(item);
       this.skipNewlines(LexContext.CasePattern);
@@ -1228,7 +1250,7 @@ class Parser {
   // select_clause := SELECT word [IN word* (';'|NL)] DO list DONE
   private selectClause(): Select {
     const pos = this.tok.next(LexContext.CommandStart).pos;
-    const name = this.readWord(LexContext.Normal);
+    const name = this.readRequiredWord("select");
     let wordlist: Word[] | undefined;
     this.skipNewlines(LexContext.CommandStart);
     if (this.tok.peek(LexContext.CommandStart).token === Token.In) {
@@ -1585,6 +1607,14 @@ class Parser {
 
   private readWord(ctx: LexContext): Word {
     return this.toWord(this.tok.next(ctx));
+  }
+
+  // A missing word stays empty and leaves its token to the rest of the clause.
+  private readRequiredWord(keyword: string): Word {
+    const t = this.tok.peek(LexContext.Normal);
+    if (t.token === Token.Word) return this.toWord(this.tok.next(LexContext.Normal));
+    if (t.token !== Token.EOF) this.error(`expected word after '${keyword}'`, t.pos);
+    return new WordImpl("", t.pos, t.pos, this.source, undefined, this.depth);
   }
 
   private toWord(tok: TokenValue): Word {

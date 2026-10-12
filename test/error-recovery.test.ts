@@ -402,3 +402,41 @@ test("empty conditions and loop or else bodies report a missing command", () => 
     assert.equal(parse(source).errors, undefined, source);
   }
 });
+
+test("case, for and select require a word after the keyword", () => {
+  for (const [source, message, pos] of [
+    ["case\nin esac", "expected word after 'case'", 4],
+    ["for ; do :; done", "expected word after 'for'", 4],
+    ["select ; do :; done", "expected word after 'select'", 7],
+  ] as const) {
+    assert.deepEqual(parse(source).errors, [{ message, pos }], source);
+  }
+});
+
+test("case items need pattern words separated by '|' and a terminator before the next pattern", () => {
+  for (const [source, pos] of [
+    ["case x in a b) echo;; esac", 12],
+    ["case x in ) echo;; esac", 10],
+    ["case x in a | ) echo;; esac", 14],
+    ["case x in a) echo;; | b) ;; esac", 20],
+    ["case x in a |\nb) ;; esac", 13],
+    ["case x in a) b) echo;; esac", 14],
+    ["case x in a) ; b) ;; esac", 13],
+    ["case x in a) echo\nb) echo;; esac", 19],
+  ] as const) {
+    const token = source[pos] === "\n" ? "newline" : source[pos];
+    assert.deepEqual(parse(source).errors, [{ message: `unexpected token '${token}'`, pos }], source);
+  }
+  for (const source of [
+    "case x in a) echo ;; b) esac",
+    "case x in (a) ;; esac",
+    "case x in a|b) echo;; (c|d) echo;& e) ;;& esac",
+    'case x in a|"b c"|$y) ;; esac',
+    "case x in\n# c\na) ;; esac",
+    "case x in a) # c\n;; esac",
+    "case x in a) echo\n;;\nesac",
+    "case in in in) echo;; esac",
+  ]) {
+    assert.equal(parse(source).errors, undefined, source);
+  }
+});

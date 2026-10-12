@@ -13,6 +13,8 @@ const knownInvalidInputs = new Set([
   "( )",
   "while; do exit; done",
   "while false; do; done",
+  // `;|` is a MirBSD Korn shell and Zsh case terminator.
+  "case i in 1) a ;| 2) b ;; esac",
   "select foo bar",
   "foo |&",
   "foo \\" + "\n\t|&",
