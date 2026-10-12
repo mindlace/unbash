@@ -18,25 +18,13 @@ structure without executing it. It returns a typed, source-positioned AST.
 
 Example use cases:
 
-- Classify commands, redirects, substitutions, and background execution for
-  permission prompts, allowlists, or audit findings
-- Statically inventory executables and literal file, configuration, and
-  dependency references in package scripts, CI steps, task-runner configs,
-  hooks, and source-code shell calls
-- Import or convert a supported command such as `curl` without folding
-  neighboring pipelines, logical chains, redirects, or comments into its
-  arguments
+- Classify scripts for permission prompts, allowlists, or audit findings
+- Collect executables and literal file, configuration, and dependency references
+- Import or convert commands such as `curl` to code
 - Attach diagnostics to generated or pasted Bash using source-positioned errors
   and partial trees
 - Build explanations, visualizations, or structured previews of pipelines,
   conditions, expansions, and nested commands
-- Find or migrate command invocations and flags with source-range edits that
-  leave surrounding formatting and comments untouched
-
-When Bash is embedded in JSON, YAML, or source code, use the host-language
-parser to extract the shell string first. unbash provides Bash structure and
-source ranges within that string; the consumer owns command-specific argument
-semantics and policy.
 
 ## Supported syntax
 
@@ -44,23 +32,19 @@ unbash supports commands, control flows, pipelines, redirects, assignments,
 compound statements, parameter and word expansions, process and nested
 substitutions, coproc, heredocs, herestrings, nested and generated syntax, etc.
 
-Nested commands remain structured inside parameter operands and array indexes,
-arithmetic expressions, brace expansions, extglobs, redirect targets, and
-heredoc bodies. Nodes retain source positions and words retain both raw text and
-dequoted values.
+unbash parses GNU Bash 5.3 with non-interactive defaults including `extglob`
+patterns. POSIX `sh` scripts parse as Bash. unbash does not gate syntax by
+version (i.e. it accepts syntax that older Bash releases reject).
 
-Malformed and incomplete input returns a best-effort partial AST with detected,
-source-positioned errors. Recovery is bounded for deeply nested parameter and
-arithmetic expansions, substitutions, subshells, braces, conditionals, loops,
-`select`, `case`, and `[[ ]]` groups.
+## Unsupported syntax
 
-unbash does not execute code, perform shell expansion, provide a sandbox, or
-decide whether a command is safe. Security-sensitive consumers must inspect word
-parts, nested scripts, and errors on each parsed script. unbash is a tolerant
-parser: for malformed or incomplete input, it recovers where possible and
-returns a best-effort partial AST with source-positioned errors. It does not
-target PowerShell, `cmd.exe`, or other shell languages. Much POSIX `sh` syntax
-is also valid Bash.
+Other shell languages are not supported: zsh, ksh93, mksh, fish, PowerShell,
+`cmd.exe` or csh, Bats test files. Their scripts may produce errors or a
+misleading tree.
+
+unbash is a tolerant parser: for malformed or incomplete input, it recovers
+where possible and returns a best-effort partial AST with source-positioned
+errors.
 
 To parse `process.argv` (`string[]`), use Node.js [`parseArgs`][4] or a CLI
 library such as [yargs][5] or [citty][6].
