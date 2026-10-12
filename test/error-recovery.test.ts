@@ -375,3 +375,30 @@ test("empty brace groups and subshells report a missing command", () => {
     assert.equal(parse(source).errors, undefined, source);
   }
 });
+
+test("empty conditions and loop or else bodies report a missing command", () => {
+  for (const [source, message, pos] of [
+    ["if; then :; fi", "expected command after 'if'", 2],
+    ["if true; then :; elif; then :; fi", "expected command after 'elif'", 21],
+    ["if true; then :; else fi", "expected command after 'else'", 22],
+    ["while; do :; done", "expected command after 'while'", 5],
+    ["until\ndo :; done", "expected command after 'until'", 6],
+    ["while # c\ndo :; done", "expected command after 'while'", 10],
+    ["while false; do\ndone", "expected command after 'do'", 16],
+    ["for x in a; do done", "expected command after 'do'", 15],
+    ["for ((;;)); do done", "expected command after 'do'", 15],
+    ["select x in a; do done", "expected command after 'do'", 18],
+  ] as const) {
+    assert.deepEqual(parse(source).errors, [{ message, pos }], source);
+  }
+  for (const source of [
+    "while :; do :; done",
+    "until false; do :; done",
+    "if a; then b; elif c; then d; else e; fi",
+    "if true; then :; else # c\n:; fi",
+    "for x; do :; done",
+    "for ((;;)) { :; }",
+  ]) {
+    assert.equal(parse(source).errors, undefined, source);
+  }
+});

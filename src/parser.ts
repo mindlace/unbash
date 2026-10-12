@@ -576,6 +576,19 @@ class Parser {
     while (this.tok.peek(ctx).token === Token.Newline) this.tok.next(ctx);
   }
 
+  private doBody(hasDo: boolean): Statement[] {
+    const body = this.list();
+    const emptyPos = hasDo ? this.emptyListPos(body) : -1;
+    if (emptyPos >= 0) this.error("expected command after 'do'", emptyPos);
+    return body;
+  }
+
+  // Where an empty compound list stopped, or -1. An empty condition is reported only
+  // once `then` or `do` follows, so a missing keyword is not reported twice.
+  private emptyListPos(commands: Statement[]): number {
+    return commands.length === 0 ? this.tok.peek(LexContext.CommandStart).pos : -1;
+  }
+
   private makeStatement(command: Statement["command"]): Statement {
     return {
       type: "Statement",
@@ -932,10 +945,14 @@ class Parser {
     let clause: CompoundList;
     let then_: CompoundList;
     for (;;) {
-      clause = this.makeCompoundList(this.list());
+      const clauseCommands = this.list();
+      const emptyClausePos = this.emptyListPos(clauseCommands);
+      clause = this.makeCompoundList(clauseCommands);
       this.skipSemi();
       const thenToken = this.accept(Token.Then, LexContext.CommandStart);
       if (!thenToken) this.error("expected 'then'", this.tok.getPos());
+      else if (emptyClausePos >= 0)
+        this.error(`expected command after '${branchPos === pos ? "if" : "elif"}'`, emptyClausePos);
       const thenCommands = this.list();
       if (thenToken && thenCommands.length === 0)
         this.error("expected command after 'then'", this.tok.peek(LexContext.CommandStart).pos);
@@ -960,7 +977,10 @@ class Parser {
     let else_: CompoundList | If | undefined;
     let end: number;
     if (this.accept(Token.Else, LexContext.CommandStart)) {
-      else_ = this.makeCompoundList(this.list());
+      const elseCommands = this.list();
+      const emptyElsePos = this.emptyListPos(elseCommands);
+      if (emptyElsePos >= 0) this.error("expected command after 'else'", emptyElsePos);
+      else_ = this.makeCompoundList(elseCommands);
       this.skipSemi();
       const closeEnd = this.acceptEnd(Token.Fi, LexContext.CommandStart);
       if (closeEnd < 0) this.error("expected 'fi' to close 'if'", this.tok.getPos());
@@ -1007,7 +1027,8 @@ class Parser {
       const bg = this.braceGroup();
       return { type: "For", pos, end: bg.end, name, wordlist, body: bg.body } satisfies For;
     }
-    if (!this.accept(Token.Do, LexContext.CommandStart)) this.error("expected 'do'", this.tok.getPos());
+    const hasDo = this.accept(Token.Do, LexContext.CommandStart) !== null;
+    if (!hasDo) this.error("expected 'do'", this.tok.getPos());
 
     if (this.syntaxDepth === MAX_SYNTAX_NESTING) {
       this.error("maximum for nesting depth exceeded", pos);
@@ -1018,7 +1039,7 @@ class Parser {
     }
 
     this.syntaxDepth++;
-    const body = this.list();
+    const body = this.doBody(hasDo);
     this.syntaxDepth--;
     this.skipSemi();
     const closeEnd = this.acceptEnd(Token.Done, LexContext.CommandStart);
@@ -1049,7 +1070,8 @@ class Parser {
         this.tok.getSubstitutionContext(),
       );
     }
-    if (!this.accept(Token.Do, LexContext.CommandStart)) this.error("expected 'do'", this.tok.getPos());
+    const hasDo = this.accept(Token.Do, LexContext.CommandStart) !== null;
+    if (!hasDo) this.error("expected 'do'", this.tok.getPos());
 
     if (this.syntaxDepth === MAX_SYNTAX_NESTING) {
       this.error("maximum for nesting depth exceeded", pos);
@@ -1073,7 +1095,7 @@ class Parser {
     }
 
     this.syntaxDepth++;
-    const body = this.list();
+    const body = this.doBody(hasDo);
     this.syntaxDepth--;
     const closeEnd = this.acceptEnd(Token.Done, LexContext.CommandStart);
     if (closeEnd < 0) this.error("expected 'done' to close 'for'", this.tok.getPos());
@@ -1121,10 +1143,14 @@ class Parser {
     }
 
     this.syntaxDepth++;
-    const clause = this.makeCompoundList(this.list());
+    const clauseCommands = this.list();
+    const emptyClausePos = this.emptyListPos(clauseCommands);
+    const clause = this.makeCompoundList(clauseCommands);
     this.skipSemi();
-    if (!this.accept(Token.Do, LexContext.CommandStart)) this.error("expected 'do'", this.tok.getPos());
-    const body = this.list();
+    const hasDo = this.accept(Token.Do, LexContext.CommandStart) !== null;
+    if (!hasDo) this.error("expected 'do'", this.tok.getPos());
+    else if (emptyClausePos >= 0) this.error(`expected command after '${kind}'`, emptyClausePos);
+    const body = this.doBody(hasDo);
     this.skipSemi();
     const closeEnd = this.acceptEnd(Token.Done, LexContext.CommandStart);
     if (closeEnd < 0) this.error(`expected 'done' to close '${kind}'`, this.tok.getPos());
@@ -1218,7 +1244,8 @@ class Parser {
       const bg = this.braceGroup();
       return { type: "Select", pos, end: bg.end, name, wordlist, body: bg.body } satisfies Select;
     }
-    if (!this.accept(Token.Do, LexContext.CommandStart)) this.error("expected 'do'", this.tok.getPos());
+    const hasDo = this.accept(Token.Do, LexContext.CommandStart) !== null;
+    if (!hasDo) this.error("expected 'do'", this.tok.getPos());
 
     if (this.syntaxDepth === MAX_SYNTAX_NESTING) {
       this.error("maximum select nesting depth exceeded", pos);
@@ -1229,7 +1256,7 @@ class Parser {
     }
 
     this.syntaxDepth++;
-    const body = this.list();
+    const body = this.doBody(hasDo);
     this.syntaxDepth--;
     this.skipSemi();
     const closeEnd = this.acceptEnd(Token.Done, LexContext.CommandStart);

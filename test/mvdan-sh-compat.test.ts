@@ -8,9 +8,11 @@ const fixturesDir = join(import.meta.dirname, "../fixtures/mvdan-sh");
 const source = readFileSync(join(fixturesDir, "filetests_test.go"), "utf8");
 const snapshot = readFileSync(join(fixturesDir, "filetests_snapshot.txt"), "utf8").split("\n").slice(0, -1); // drop trailing newline
 const knownInvalidInputs = new Set([
-  // Bash rejects empty groups; mvdan accepts them only for Zsh and MirBSD Korn shell.
+  // Bash rejects empty groups and lists; mvdan accepts them only for Zsh and MirBSD Korn shell.
   "{ }",
   "( )",
+  "while; do exit; done",
+  "while false; do; done",
   "select foo bar",
   "foo |&",
   "foo \\" + "\n\t|&",
