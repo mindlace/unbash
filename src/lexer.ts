@@ -15,7 +15,7 @@ import { decodeAnsiCQuoted } from "./ansi-c.ts";
 import { parseArithmeticExpression } from "./arithmetic.ts";
 import { MAX_SYNTAX_NESTING } from "./limits.ts";
 import { WordImpl } from "./word.ts";
-import type { SubstitutionContext } from "./substitution-context.ts";
+import { createSubstitutionContext, type SubstitutionContext } from "./substitution-context.ts";
 import { hasGlobCharacters, parseGlobParts } from "./glob.ts";
 import {
   skipLineContinuations,
@@ -550,8 +550,7 @@ export class Lexer {
   private hasPeek: boolean;
   private pendingHereDocs: PendingHereDoc[] | null;
   private collectedExpansions: DeferredCommandExpansion[] | null;
-  private substitutionContext: SubstitutionContext | undefined;
-  private contextOwner: Lexer | undefined;
+  private substitutionContext: SubstitutionContext;
   _errors: ParseError[] | null = null;
   _buildParts = false;
   // Build processed text while scanning. Off on the normal token path (values
@@ -565,7 +564,13 @@ export class Lexer {
   // `start`/`end` bound the lexer to a window of `src` so substitution scripts can be
   // parsed in place against the original source — every position is then absolute, with
   // no slicing or re-basing. Defaults cover the whole string (the common top-level parse).
-  constructor(src: string, start = 0, end = src.length, parenBoundary = false, context?: SubstitutionContext) {
+  constructor(
+    src: string,
+    start = 0,
+    end = src.length,
+    parenBoundary = false,
+    context: SubstitutionContext = createSubstitutionContext(),
+  ) {
     this.src = src;
     this.srcEnd = end;
     this.parenBoundary = parenBoundary;
@@ -576,7 +581,6 @@ export class Lexer {
     this.pendingHereDocs = null;
     this.collectedExpansions = null;
     this.substitutionContext = context;
-    this.contextOwner = undefined;
 
     if (start === 0 && src.charCodeAt(0) === CH_HASH && src.charCodeAt(1) === CH_BANG) {
       const nl = src.indexOf("\n");
@@ -588,17 +592,15 @@ export class Lexer {
     return this.src;
   }
 
-  // Fresh window sharing source, depth and boundary context; tokens, errors, heredocs and build flags reset.
+  // Fresh window sharing source, depth and substitution context; tokens, errors, heredocs and build flags reset.
   fork(start: number, end: number, parenBoundary = false): Lexer {
-    const lexer = new Lexer(this.src, start, end, parenBoundary);
+    const lexer = new Lexer(this.src, start, end, parenBoundary, this.substitutionContext);
     lexer._nestingDepth = this._nestingDepth;
-    // A context first discovered by lookahead must remain available to the owner's lazy words.
-    lexer.contextOwner = this.contextOwner ?? this;
     return lexer;
   }
 
-  getSubstitutionContext(): SubstitutionContext | undefined {
-    return (this.contextOwner ?? this).substitutionContext;
+  getSubstitutionContext(): SubstitutionContext {
+    return this.substitutionContext;
   }
 
   get errors(): ParseError[] {
@@ -627,16 +629,7 @@ export class Lexer {
 
   protected findSubstitutionEnd(start: number, end: number, depth = this._nestingDepth + 1): number {
     if (Lexer._findSubstitutionEnd === undefined) return -1;
-    const owner = this.contextOwner ?? this;
-    const context =
-      owner.substitutionContext ??
-      (owner.substitutionContext = {
-        boundaries: new Map(),
-        wordParts: undefined,
-        embeddedParts: undefined,
-        arrayParts: undefined,
-      });
-    return Lexer._findSubstitutionEnd(this.src, start, end, depth, context);
+    return Lexer._findSubstitutionEnd(this.src, start, end, depth, this.substitutionContext);
   }
 
   /** Materialize a word token's value: raw spans slice directly, others re-lex the span. */
@@ -3922,7 +3915,7 @@ export class Lexer {
     let depth = quoteOnly ? 0 : 1;
     const start = this.pos;
     this._unbalanced = false;
-    const knownEnd = useGrammar && !quoteOnly ? this.getSubstitutionContext()?.boundaries.get(start) : undefined;
+    const knownEnd = useGrammar && !quoteOnly ? this.substitutionContext.boundaries?.get(start) : undefined;
     if (knownEnd !== undefined && knownEnd <= len && this._nestingDepth < MAX_SYNTAX_NESTING) {
       this.pos = knownEnd;
       return bt ? src.slice(start, knownEnd - 1) : "";

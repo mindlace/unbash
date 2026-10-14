@@ -4,14 +4,12 @@ import { unescapeBareValue, wordPartsValue } from "./word-value.ts";
 export type PartsResolver = (source: string, word: Word, depth: number) => WordPart[] | undefined;
 
 export class WordImpl implements Word {
-  static _resolveWord: PartsResolver;
-
   type = "Word" as const;
   text: string;
   pos: number;
   end: number;
   #source: string | undefined;
-  #resolver: PartsResolver;
+  #resolver: PartsResolver | undefined;
   #depth: number;
   #parts: WordPart[] | undefined | null;
   #value: string | null = null;
@@ -21,9 +19,9 @@ export class WordImpl implements Word {
     this.pos = pos;
     this.end = end;
     this.#source = source;
-    this.#resolver = resolver ?? WordImpl._resolveWord;
+    this.#resolver = resolver;
     this.#depth = depth;
-    this.#parts = source !== undefined || resolver !== undefined ? null : undefined;
+    this.#parts = resolver === undefined ? undefined : null;
   }
 
   get value(): string {
@@ -36,7 +34,7 @@ export class WordImpl implements Word {
 
   get parts(): WordPart[] | undefined {
     if (this.#parts === null) {
-      this.#parts = this.#resolver(this.#source ?? "", this, this.#depth) ?? undefined;
+      this.#parts = this.#resolver?.(this.#source ?? "", this, this.#depth) ?? undefined;
     }
     return this.#parts;
   }

@@ -1,24 +1,18 @@
 import type { HereDocBody, WordPart } from "./internal-types.ts";
+import { computeHereDocBodyParts } from "./parts.ts";
 import type { SubstitutionContext } from "./substitution-context.ts";
 
 export class HereDocBodyImpl implements HereDocBody {
-  static _resolveParts: (
-    source: string,
-    body: HereDocBody,
-    depth: number,
-    context?: SubstitutionContext,
-  ) => WordPart[] | undefined;
-
   type = "HereDocBody" as const;
   pos: number;
   end: number;
   text = "";
   #source: string;
   #depth: number;
-  #context: SubstitutionContext | undefined;
+  #context: SubstitutionContext;
   #parts: WordPart[] | undefined | null;
 
-  constructor(source: string, pos: number, quoted: boolean, depth: number, context?: SubstitutionContext) {
+  constructor(source: string, pos: number, quoted: boolean, depth: number, context: SubstitutionContext) {
     this.pos = pos;
     this.end = pos;
     this.#source = source;
@@ -28,8 +22,7 @@ export class HereDocBodyImpl implements HereDocBody {
   }
 
   get parts(): WordPart[] | undefined {
-    if (this.#parts === null)
-      this.#parts = HereDocBodyImpl._resolveParts(this.#source, this, this.#depth, this.#context);
+    if (this.#parts === null) this.#parts = computeHereDocBodyParts(this.#source, this, this.#depth, this.#context);
     return this.#parts;
   }
 

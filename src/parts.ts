@@ -2,30 +2,27 @@ import type { Word, WordPart } from "./internal-types.ts";
 import { hasEmbeddedWordStructure, Lexer } from "./lexer.ts";
 import { parseRegion } from "./parser.ts";
 import type { PartsResolver } from "./word.ts";
-import type { SubstitutionContext } from "./substitution-context.ts";
+import { createSubstitutionContext, type SubstitutionContext } from "./substitution-context.ts";
 import { MAX_SYNTAX_NESTING } from "./limits.ts";
 import { hasGlobCharacters, parseGlobParts } from "./glob.ts";
 
 export const computeBareWordParts: PartsResolver = (_source, word) =>
   hasGlobCharacters(word.text) ? parseGlobParts(word.text, 0, word.text.length, undefined, word.pos) : undefined;
 
-export function wordPartsResolver(context: SubstitutionContext | undefined): PartsResolver | undefined {
-  if (context === undefined) return undefined;
+export function wordPartsResolver(context: SubstitutionContext): PartsResolver {
   return (
     context.wordParts ?? (context.wordParts = (source, word, depth) => computeWordParts(source, word, depth, context))
   );
 }
 
-export function embeddedPartsResolver(context: SubstitutionContext | undefined): PartsResolver {
-  if (context === undefined) return computeEmbeddedWordParts;
+export function embeddedPartsResolver(context: SubstitutionContext): PartsResolver {
   return (
     context.embeddedParts ??
     (context.embeddedParts = (source, word, depth) => computeEmbeddedWordParts(source, word, depth, context))
   );
 }
 
-export function arrayPartsResolver(context: SubstitutionContext | undefined): PartsResolver {
-  if (context === undefined) return computeArrayElementParts;
+export function arrayPartsResolver(context: SubstitutionContext): PartsResolver {
   return (
     context.arrayParts ??
     (context.arrayParts = (source, word, depth) => computeArrayElementParts(source, word, depth, context))
@@ -42,7 +39,7 @@ export function computeWordParts(
   source: string,
   word: Pick<Word, "pos" | "end">,
   depth = 0,
-  context?: SubstitutionContext,
+  context: SubstitutionContext = createSubstitutionContext(),
 ): WordPart[] | undefined {
   // Bound the re-lex to the word's span. A word inside a substitution script carries the
   // whole original as its source, so an unbounded scan would overrun the word into an
@@ -61,7 +58,7 @@ export function computeEmbeddedWordParts(
   source: string,
   word: Pick<Word, "pos" | "end">,
   depth = 0,
-  context?: SubstitutionContext,
+  context: SubstitutionContext,
   arithmetic = false,
 ): WordPart[] | undefined {
   if (!hasEmbeddedWordStructure(source, word.pos, word.end)) return undefined;
@@ -77,7 +74,7 @@ export function computeArrayElementParts(
   source: string,
   word: Word,
   depth = 0,
-  context?: SubstitutionContext,
+  context: SubstitutionContext,
 ): WordPart[] | undefined {
   const lexer = new Lexer(source, word.pos, word.end, false, context);
   lexer._nestingDepth = depth;
@@ -96,7 +93,7 @@ export function computeHereDocBodyParts(
   source: string,
   word: Pick<Word, "pos" | "end">,
   depth = 0,
-  context?: SubstitutionContext,
+  context: SubstitutionContext,
 ): WordPart[] | undefined {
   const lexer = new Lexer(source, word.pos, word.end, false, context);
   lexer._nestingDepth = depth;

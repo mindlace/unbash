@@ -11,10 +11,10 @@ class ArrayValueImpl implements ArrayValue {
   end: number;
   #source: string;
   #depth: number;
-  #context: SubstitutionContext | undefined;
+  #context: SubstitutionContext;
   #elements: Word[] | undefined;
 
-  constructor(source: string, pos: number, end: number, depth: number, context?: SubstitutionContext) {
+  constructor(source: string, pos: number, end: number, depth: number, context: SubstitutionContext) {
     this.pos = pos;
     this.end = end;
     this.#source = source;
@@ -58,7 +58,7 @@ export class AssignmentImpl implements Assignment {
   text: string;
   #source: string;
   #depth: number;
-  #context: SubstitutionContext | undefined;
+  #context: SubstitutionContext;
   #operatorPos: number;
   #name: string | null = null;
   #append: boolean | undefined;
@@ -72,7 +72,7 @@ export class AssignmentImpl implements Assignment {
     source: string,
     operatorPos: number,
     depth: number,
-    context?: SubstitutionContext,
+    context: SubstitutionContext,
   ) {
     this.pos = pos;
     this.end = end;
