@@ -2,6 +2,7 @@ import { nodeOfType, arrayElements, redirectsOf } from "./ast-helpers.ts";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { parse } from "../src/parser.ts";
+import { print } from "../src/printer.ts";
 import type { AssignmentPrefix, BraceGroup, Case, Command, Function, If } from "../src/types.ts";
 import { computeWordParts } from "../src/parts.ts";
 
@@ -803,4 +804,156 @@ test("an array value opens only right after an assignment operator where Bash ac
       ["Word", "b=c"],
     ],
   );
+});
+
+test("a subscript keeps its matched pair when quotes or expansions precede a metacharacter", () => {
+  // Bash reads the whole `name[...]` as one token at a command position even when the text
+  // before the first blank is not a plain run: `things[$foo $bar]=42` keys `$foo $bar`.
+  for (const [source, name, index, value] of [
+    ["things[$foo $bar]=42", "things", "$foo $bar", "42"],
+    ["a[$x y]=1", "a", "$x y", "1"],
+    ['a["x y" z]=1', "a", '"x y" z', "1"],
+    ["a['x y' z]=1", "a", "'x y' z", "1"],
+    ["a[$(echo x) y]=1", "a", "$(echo x) y", "1"],
+    ["a[${x} y]=1", "a", "${x} y", "1"],
+    ["a[$((1)) y]=1", "a", "$((1)) y", "1"],
+    [String.raw`a[x\ y z]=1`, "a", String.raw`x\ y z`, "1"],
+    ["a[$x$y z]=1", "a", "$x$y z", "1"],
+    ["a[$x y]+=1", "a", "$x y", "1"],
+    ["a[$x ;y]=1", "a", "$x ;y", "1"],
+    ["a[$x |y]=1", "a", "$x |y", "1"],
+    ["a[$x )y]=1", "a", "$x )y", "1"],
+    ["a[$x (y]=1", "a", "$x (y", "1"],
+    ["a[$x #y]=1", "a", "$x #y", "1"],
+    ["a[$x\ny]=1", "a", "$x\ny", "1"],
+  ] as const) {
+    const script = parse(source);
+    assert.equal(script.errors, undefined, source);
+    const c = nodeOfType(script.commands[0].command, "Command");
+    assert.equal(c.prefix.length, 1, source);
+    assert.equal(c.suffix.length, 0, source);
+    const assignment = c.prefix[0];
+    assert.equal(assignment.type, "Assignment", source);
+    if (assignment.type === "Assignment") {
+      assert.equal(assignment.name, name, source);
+      assert.equal(assignment.index?.text, index, source);
+      assert.equal(nodeOfType(assignment.value, "Word").text, value, source);
+    }
+    assert.equal(print(script), source, source);
+  }
+});
+
+test("quoted and escaped brackets inside a subscript do not end it", () => {
+  for (const [source, index] of [
+    [String.raw`a[x \] y]=1`, String.raw`x \] y`],
+    ['a[x "]" y]=1', 'x "]" y'],
+    ["a[x ']' y]=1", "x ']' y"],
+    ['a[x "[" y]=1', 'x "[" y'],
+    ["a[x [y] z]=1", "x [y] z"],
+    ["a[x[y z]]=1", "x[y z]"],
+  ] as const) {
+    const c = nodeOfType(parse(source).commands[0].command, "Command");
+    assert.equal(c.prefix[0]?.type, "Assignment", source);
+    if (c.prefix[0]?.type === "Assignment") assert.equal(c.prefix[0].index?.text, index, source);
+    assert.equal(c.suffix.length, 0, source);
+  }
+});
+
+test("a matched subscript also forms one command word without an operator", () => {
+  // `a[$x y]` names a command in Bash (`a[$x y]: command not found`); only arguments split.
+  const c = nodeOfType(parse("a[$x y] b").commands[0].command, "Command");
+  assert.equal(c.name?.text, "a[$x y]");
+  assert.equal(c.name?.value, "a[$x y]");
+  assert.deepEqual(
+    c.name?.parts?.map((part) => [part.type, part.text]),
+    [
+      ["Literal", "a"],
+      ["Glob", "[$x y]"],
+    ],
+  );
+  const bracket = c.name?.parts?.[1];
+  if (bracket?.type === "Glob")
+    assert.deepEqual(
+      bracket.parts?.map((part) => [part.type, part.text]),
+      [
+        ["SimpleExpansion", "$x"],
+        ["Literal", " y"],
+      ],
+    );
+  assert.deepEqual(
+    c.suffix.map((w) => nodeOfType(w, "Word").text),
+    ["b"],
+  );
+  const fn = nodeOfType(parse("a[$x y]() { :; }").commands[0].command, "Function");
+  assert.deepEqual([fn.name.text, fn.name.value], ["a[$x y]", "a[$x y]"]);
+});
+
+test("the matched pair applies at every command position but not to arguments", () => {
+  const indexOf = (command: Command) => {
+    const assignment = command.prefix.find((p) => p.type === "Assignment" && p.name === "a");
+    return assignment?.type === "Assignment" ? assignment.index?.text : undefined;
+  };
+  for (const source of ["x=1 a[$x y]=2", ">/dev/null a[$x y]=2"]) {
+    assert.equal(indexOf(nodeOfType(parse(source).commands[0].command, "Command")), "$x y", source);
+  }
+  const timed = nodeOfType(parse("time a[$x y]=1").commands[0].command, "Pipeline");
+  assert.equal(indexOf(nodeOfType(timed.commands[0], "Command")), "$x y");
+  const negated = nodeOfType(parse("! a[$x y]=1").commands[0].command, "Pipeline");
+  assert.equal(indexOf(nodeOfType(negated.commands[0], "Command")), "$x y");
+  const conditional = nodeOfType(parse("if a[$x y]=1; then :; fi").commands[0].command, "If");
+  assert.equal(indexOf(nodeOfType(conditional.clause.commands[0].command, "Command")), "$x y");
+
+  for (const source of ["declare a[$x y]=1", "echo a[$x y]=1"]) {
+    const c = nodeOfType(parse(source).commands[0].command, "Command");
+    assert.deepEqual(
+      c.suffix.map((w) => nodeOfType(w, "Assignment", "Word").text),
+      ["a[$x", "y]=1"],
+      source,
+    );
+  }
+});
+
+test("a matched subscript ends where Bash ends the token", () => {
+  // `a[$x y]=(1 2)` is syntactically an array assignment (Bash rejects it only at runtime).
+  const array = nodeOfType(parse("a[$x y]=(1 2)").commands[0].command, "Command").prefix[0];
+  assert.equal(array.type, "Assignment");
+  if (array.type === "Assignment")
+    assert.deepEqual(
+      arrayElements(array)?.map((w) => w.text),
+      ["1", "2"],
+    );
+  assert.equal(print(parse("a[$x y]=(1 2)")), "a[$x y]=(1 2)");
+  for (const [source, name, suffix] of [
+    ["a[$x y]]=1", "a[$x y]]=1", []],
+    ["a[$x y] =1", "a[$x y]", ["=1"]],
+    ["a[$x y]b[c d]=1", "a[$x y]b[c", ["d]=1"]],
+    ["1a[$x y]=1", "1a[$x", ["y]=1"]],
+  ] as const) {
+    const c = nodeOfType(parse(source).commands[0].command, "Command");
+    assert.equal(c.prefix.length, 0, source);
+    assert.equal(c.name?.text, name, source);
+    assert.deepEqual(
+      c.suffix.map((w) => nodeOfType(w, "Assignment", "Word").text),
+      suffix,
+      source,
+    );
+  }
+});
+
+test("an unclosed subscript after an expansion neither swallows the script nor repeats diagnostics", () => {
+  const script = parse("a[$x y\necho hi");
+  assert.equal(script.commands.length, 2);
+  assert.equal(nodeOfType(script.commands[1].command, "Command").name?.text, "echo");
+  assert.equal(parse("a[${x y]=1").errors?.length, 1);
+  // The rescan repeats the scan that reported the nesting limit; only one report survives.
+  const deep = parse("a[" + "${x:-".repeat(300) + "y" + "}".repeat(300) + " z]=1");
+  assert.deepEqual(
+    deep.errors?.map((e) => e.message),
+    ["maximum parameter expansion nesting depth exceeded"],
+  );
+  assert.equal(nodeOfType(deep.commands[0].command, "Command").prefix[0]?.type, "Assignment");
+  // Without a closing bracket anywhere, each line stays its own command.
+  const lines = parse("a[$x y\n".repeat(2000));
+  assert.equal(lines.commands.length, 2000);
+  assert.equal(lines.errors, undefined);
 });

@@ -684,6 +684,10 @@ export class Lexer {
     this.srcEnd = end;
     this._buildValue = true;
     this.readWordText();
+    if (this._wordInSubscript && this.pos < this.srcEnd) {
+      this.pos = start;
+      this.readWordText(true);
+    }
     const value = this._wordText;
     this.pos = savedPos;
     this.srcEnd = savedEnd;
@@ -695,6 +699,14 @@ export class Lexer {
 
   /** Find the closing bracket for a shell subscript, ignoring brackets inside nested shell syntax. */
   findClosingBracket(start: number, end: number = this.srcEnd): number {
+    // A failed search scans to the end and every unclosed subscript at a command position
+    // retries it, so answer from the last bracket in the window first.
+    const limit = Math.min(end, this.srcEnd);
+    if (limit !== this._lastBracketLimit) {
+      this._lastBracketLimit = limit;
+      this._lastBracket = this.src.lastIndexOf("]", limit - 1);
+    }
+    if (start > this._lastBracket) return -1;
     return this.findClosingShellDelimiter(start, end, CH_RBRACKET);
   }
 
@@ -1240,6 +1252,12 @@ export class Lexer {
       }
     } else {
       this.readWordText();
+      // A command word whose subscript holds a blank was bounded by the matched-pair rescan, so
+      // its parts need the same scan.
+      if (this._wordInSubscript && this.pos < this.srcEnd) {
+        this.pos = startPos;
+        this.readWordText(true);
+      }
     }
     return this._wordParts;
   }
@@ -2016,6 +2034,12 @@ export class Lexer {
   private _wordIsAssignment: boolean | undefined;
   // Set while scanning the tail of an array element, whose glob pass covers the whole element.
   private _deferGlobMarks = false;
+  // The last word scan stopped inside an unclosed array subscript.
+  private _wordInSubscript = false;
+  // Error count before the last word scan, so a rescan can replace its diagnostics.
+  private _wordErrorStart = 0;
+  private _lastBracketLimit = -1;
+  private _lastBracket = -1;
   private _wordAssignmentOperatorPos: number | undefined;
   _wordParts: WordPart[] | null = null;
   private _resultText = "";
@@ -2082,6 +2106,7 @@ export class Lexer {
     const keywordEligible = this._wordKeywordEligible;
     const isAssignment = this._wordIsAssignment;
     let assignmentOpPos = this._wordAssignmentOperatorPos;
+    const errorStart = this._wordErrorStart;
     const wordEnd = this.pos;
     const wordLen = wordEnd - tokenStart;
 
@@ -2161,10 +2186,20 @@ export class Lexer {
           wordEnd < this.srcEnd &&
           scanAssignmentPrefix(src, tokenStart, wordEnd, ASSIGNMENT_NAME_START) >= ASSIGNMENT_INDEX_BASE
         ) {
-          // The second pass leaves the fast path, setting `_wordIsAssignment`, so this
-          // cannot recur.
           this.pos = tokenStart;
           this.readWordText(true);
+          if (this.pos > wordEnd) {
+            this.classifyWord(out, ctx, tokenStart);
+            return;
+          }
+        }
+      } else if (ctx !== LexContext.Declaration && this._wordInSubscript && wordEnd < this.srcEnd) {
+        // A quoted or expanded word that stopped inside its subscript: Bash reads on to the
+        // matching bracket there. The rescan repeats the word's own diagnostics, so drop them.
+        if (this._errors !== null) this._errors.length = errorStart;
+        this.pos = tokenStart;
+        this.readWordText(true);
+        if (this.pos > wordEnd) {
           this.classifyWord(out, ctx, tokenStart);
           return;
         }
@@ -2236,6 +2271,7 @@ export class Lexer {
     const src = this.src;
     const len = this.srcEnd;
     let pos = this.pos;
+    this._wordErrorStart = this._errors === null ? 0 : this._errors.length;
 
     // Fast path: scan a single run of plain chars (covers most words)
     const fastStart = pos;
@@ -2262,6 +2298,7 @@ export class Lexer {
       this._wordKeywordEligible = true;
       this._wordIsAssignment = undefined;
       this._wordAssignmentOperatorPos = undefined;
+      this._wordInSubscript = false;
       if (this._buildParts) {
         this._wordParts =
           hasGlobCharacters(this._wordText) && !this._deferGlobMarks
@@ -2405,7 +2442,10 @@ export class Lexer {
           const close = this.findClosingBracket(pos);
           if (close !== -1) {
             const spanEnd = close + 1;
-            assignmentState = scanAssignmentPrefix(src, pos, spanEnd, assignmentState);
+            // The scanner matched the innermost open bracket past quotes, escapes and nested
+            // substitutions, so the jump closes exactly one subscript level.
+            assignmentState =
+              assignmentState === ASSIGNMENT_INDEX_BASE + 1 ? ASSIGNMENT_AFTER_INDEX : assignmentState - 1;
             lastValueChar = src.charCodeAt(close);
             if (bt) {
               const chunk = src.slice(pos, spanEnd);
@@ -2646,6 +2686,7 @@ export class Lexer {
     this._wordKeywordEligible = keywordEligible;
     this._wordIsAssignment = isMatchedAssignment(assignmentState);
     this._wordAssignmentOperatorPos = this._wordIsAssignment ? assignmentOperatorPos(assignmentState) : undefined;
+    this._wordInSubscript = assignmentState >= ASSIGNMENT_INDEX_BASE;
     if (bp) {
       // Only store parts if they add structure beyond a single literal
       this._wordParts = parts!.length > 1 || (parts!.length === 1 && parts![0].type !== "Literal") ? parts! : null;
