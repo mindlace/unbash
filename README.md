@@ -29,13 +29,16 @@ Example use cases:
 
 ## Supported syntax
 
-unbash supports commands, control flows, pipelines, redirects, assignments,
-compound statements, parameter and word expansions, process and nested
-substitutions, coproc, heredocs, herestrings, nested and generated syntax, etc.
+unbash parses GNU Bash.
 
-unbash parses GNU Bash 5.3 with non-interactive defaults including `extglob`
-patterns. POSIX `sh` scripts parse as Bash. unbash does not gate syntax by
-version (i.e. it accepts syntax that older Bash releases reject).
+Currently at Bash v5.3 with non-interactive defaults including `extglob`
+patterns. Supported syntax includes commands, control flows, pipelines,
+redirects, assignments, compound statements, parameter and word expansions,
+process and nested substitutions, coproc, heredocs, herestrings, nested and
+generated syntax, etc. etc.
+
+POSIX `sh` scripts parse as Bash. unbash does not gate syntax by version, i.e.
+it accepts syntax that older Bash releases reject.
 
 ## Unsupported syntax
 
@@ -43,9 +46,9 @@ Other shell languages are not supported: zsh, ksh93, mksh, fish, PowerShell,
 `cmd.exe`, csh, Bats test files. Such scripts may produce errors or a misleading
 tree.
 
-unbash is a tolerant parser: for malformed or incomplete input, it recovers
-where possible and returns a best-effort partial AST with source-positioned
-errors.
+unbash is a tolerant parser: for malformed, incomplete or excessively nested
+input, it recovers where possible and returns a best-effort partial AST with
+source-positioned errors for what it detects while parsing.
 
 To parse `process.argv` (`string[]`), use Node.js [`parseArgs`][4] or a library
 such as [yargs][5] or [citty][6].
@@ -76,77 +79,34 @@ Result:
 
 See the full AST at [unbash.statichost.page#input=if \[ -f...][7]
 
-### Word parts
-
-A `Word` holds its expansions in `parts`. This is a lazy getter, computed on
-first access (not an own enumerable property):
-
-```js
-const source = "echo a$(id)b";
-const word = parse(source).commands[0].command.suffix[0];
-
-word.parts; // [Literal, CommandExpansion, Literal]
-
-Object.keys(word); // ["type", "text", "pos", "end"]
-({ ...word }); // same
-structuredClone(word); // same
-```
-
-Read `parts` directly, or serialize with `JSON.stringify`, which includes it
-through `toJSON`. A generic walker driven by `Object.keys` finds no expansions
-at all, and reports no error while doing so:
-
-```js
-import { parse } from "unbash";
-
-const script = parse('echo "$HOME" $(mktemp)');
-
-for (const statement of script.commands) {
-  const command = statement.command;
-  if (command.type !== "Command") continue;
-  for (const word of [command.name, ...command.args]) {
-    if (word?.type !== "Word") continue;
-    for (const part of word.parts ?? []) {
-      if (part.type === "CommandExpansion") console.log(part.text);
-    }
-  }
-}
-// $(mktemp)
-```
-
-`BraceExpansion`, `ExtendedGlob`, `ArithmeticWord`, and `HereDocBody` expose
-nested syntax through `parts`. Parameter and assignment indexes are Words with
-their own `parts`. Assignment values are Words or ArrayValues; array elements
-are Words. Declaration assignments and redirects are separate command items,
-each with its own children. `Command.args` and `Command.redirects` are lazy
-views over the ordered `prefix` and `suffix` items. They are getters like
-`parts`, but `JSON.stringify` omits them because the two lists already carry
-every item.
-
 Positions are zero-based UTF-16 code-unit offsets forming half-open `[pos, end)`
-ranges in the source owned by the nearest `ParsedScript`. Root scripts and
-verbatim nested substitutions share the caller's source, so their ranges slice
-that source directly:
+ranges into the source.
 
-```js
-const nested = word.parts.find(
-  (part) => part.type === "CommandExpansion",
-).script;
-const command = nested.commands[0].command;
+### Visit
 
-source.slice(command.pos, command.end); // exact nested command source
+`forEachChild(node, callback)` calls the callback once for each direct child,
+including word parts such as expansions and the `script` of a substitution,
+which resolve on first access. It does not recurse: call it from the callback to
+descend, or skip the call to leave a subtree unresolved.
+
+```ts
+import { forEachChild, parse, type SyntaxNode } from "unbash";
+
+const source = 'echo "$HOME" $(mktemp -d)';
+
+function visit(node: SyntaxNode): void {
+  if (node.type === "Command") console.log(source.slice(node.pos, node.end));
+  forEachChild(node, visit);
+}
+
+visit(parse(source));
+// echo "$HOME" $(mktemp -d)
+// mktemp -d
 ```
 
-A legacy backtick script whose body contains backslash escapes owns its decoded
-string as an enumerable `source` property, retained by JSON serialization.
-Ordinary scripts nested inside it index that decoded source. Live nodes still
-have lazy prototype getters; use `JSON.stringify` when serializing their
-complete public syntax.
-
-Parse errors inside a lazily parsed script surface on that script, not on the
-root: check `errors` on every nested `script` while traversing. A consumer that
-only reads the root `errors` array cannot tell that a substitution body failed
-to parse.
+The callback receives only the child and its return value is ignored. A nested
+script reports its own `errors`, so check them while visiting. See [Migrating
+from v5][8] for the node shapes and lazy fields.
 
 ### Print
 
@@ -171,7 +131,7 @@ fi
 
 ## unbash vs tree-sitter-bash
 
-[tree-sitter-bash][8] is the right choice when you need:
+[tree-sitter-bash][9] is the right choice when you need:
 
 - Incremental parsing
 - CST output preserving all tokens and punctuation
@@ -185,11 +145,11 @@ unbash provides:
 - Structured word parts, arithmetic and test-expression trees, recursively
   parsed substitutions, and direct source positions
 - Best-effort error recovery that preserves a partial AST and collects errors
-- Also see [tree-sitter-bash gaps covered by unbash][9]
+- Also see [tree-sitter-bash gaps covered by unbash][10]
 
 ## unbash vs sh-syntax
 
-[sh-syntax][10] is a WASM wrapper around the robust [mvdan/sh][11] Go parser. It
+[sh-syntax][11] is a WASM wrapper around the robust [mvdan/sh][12] Go parser. It
 is highly recommended if you need:
 
 - Support for Bash, POSIX sh, mksh, Bats, and experimental Zsh parsing
@@ -201,11 +161,11 @@ unbash provides:
 - A smaller, JSON-friendly Bash AST with lazy structured word parts, recursively
   parsed substitutions, and direct source positions
 - Best-effort partial ASTs for malformed or incomplete editor and user input
-- Also see [sh-syntax gaps covered by unbash][12]
+- Also see [sh-syntax gaps covered by unbash][13]
 
 ## unbash vs bash-parser
 
-[bash-parser][13] and its fork [@ericcornelissen/bash-parser][14] (community
+[bash-parser][14] and its fork [@ericcornelissen/bash-parser][15] (community
 dependency maintenance fork ❤️ now archived) provide:
 
 - A POSIX-only mode that rejects bash-specific syntax
@@ -216,7 +176,7 @@ unbash provides:
 - A typed TypeScript API (ESM-only)
 - Best-effort error recovery that preserves a partial AST and collects errors
 - Structured AST nodes for parameter expansions, arithmetic expressions, and `[[
-]]` test expressions; `bash-parser` treats `[[ ]]` as ordinary commands and
+  ]]` test expressions; `bash-parser` treats `[[ ]]` as ordinary commands and
   `(( ))` as nested subshells
 - Herestrings, C-style `for`, `select`, process substitution, `coproc`, array
   assignments, extglob, `;&`/`;;&` case fallthrough, Bash 5.3 command
@@ -251,8 +211,8 @@ The parser bundle is 85K minified and 21K gzipped.
 
 ## Playgrounds
 
-- [unbash.statichost.page][15]
-- [ast-explorer.dev][16]
+- [unbash.statichost.page][16]
+- [ast-explorer.dev][17]
 
 ## License
 
@@ -265,12 +225,13 @@ ISC
 [5]: https://yargs.js.org/
 [6]: https://www.npmjs.com/package/citty
 [7]: https://unbash.statichost.page/#input=if%20%5B%20-f%20%22%241%22%20%5D%3B%20then%20cat%20%22%241%22%3B%20fi
-[8]: https://github.com/tree-sitter/tree-sitter-bash
-[9]: https://github.com/webpro-nl/unbash/issues/6
-[10]: https://github.com/un-ts/sh-syntax
-[11]: https://github.com/mvdan/sh
-[12]: https://github.com/webpro-nl/unbash/issues/7
-[13]: https://github.com/vorpaljs/bash-parser
-[14]: https://github.com/ericcornelissen/bash-parser
-[15]: https://unbash.statichost.page
-[16]: https://ast-explorer.dev/#eNoVjDsKwzAQRK8yDK5CyAGS2nVAId02jixZAbFr/Kls393rbh7zeBsrn5xLqpV3jr5X/XVzcYgOKRaD8LoNzffTBqFotgkZf8XtUW14oTdRIHaLq00WYscwpRFtCO8g2psm75n3toPHCdz+Ivg=
+[8]: docs/MIGRATION-v5-to-v6.md
+[9]: https://github.com/tree-sitter/tree-sitter-bash
+[10]: https://github.com/webpro-nl/unbash/issues/6
+[11]: https://github.com/un-ts/sh-syntax
+[12]: https://github.com/mvdan/sh
+[13]: https://github.com/webpro-nl/unbash/issues/7
+[14]: https://github.com/vorpaljs/bash-parser
+[15]: https://github.com/ericcornelissen/bash-parser
+[16]: https://unbash.statichost.page
+[17]: https://ast-explorer.dev/#eNoVjDsKwzAQRK8yDK5CyAGS2nVAId02jixZAbFr/Kls393rbh7zeBsrn5xLqpV3jr5X/XVzcYgOKRaD8LoNzffTBqFotgkZf8XtUW14oTdRIHaLq00WYscwpRFtCO8g2psm75n3toPHCdz+Ivg=
