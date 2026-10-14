@@ -2,6 +2,7 @@ import { nodeOfType } from "./ast-helpers.ts";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { parse } from "../src/parser.ts";
+import { print } from "../src/printer.ts";
 import type { Case, Command, Coproc, For, Function, If, Pipeline, Subshell, While } from "../src/types.ts";
 
 const getCmd = (ast: ReturnType<typeof parse>, i = 0) => ast.commands[i].command as Command;
@@ -379,6 +380,110 @@ test("coproc simple command with multiple arguments", () => {
     cmd.suffix.map((s) => nodeOfType(s, "Assignment", "Word").text),
     ["bar", "baz"],
   );
+});
+
+test("coproc keeps initial assignment-shaped arguments together", () => {
+  for (const [source, expected] of [
+    ["coproc foo t[a b]=1", ["t[a b]=1"]],
+    ["coproc foo t[$x y]=1", ["t[$x y]=1"]],
+    ['coproc "foo" t[a b]=1', ["t[a b]=1"]],
+    ["coproc foo t[a b]=1 t[c d]=2", ["t[a b]=1", "t[c d]=2"]],
+    ["coproc foo a=1 b=(x y) t[c d]=2", ["a=1", "b=(x y)", "t[c d]=2"]],
+    ["coproc foo t[a b] t[c d]=2", ["t[a b]", "t[c", "d]=2"]],
+    ["coproc foo echo t[a b]=1", ["echo", "t[a", "b]=1"]],
+    ["coproc foo a=1 > /dev/null t[a b]=1", ["a=1", "t[a", "b]=1"]],
+    ["coproc x=1 foo t[a b]=1", ["t[a", "b]=1"]],
+  ] as const) {
+    const script = parse(source);
+    assert.equal(script.errors, undefined, source);
+    const coproc = nodeOfType(script.commands[0].command, "Coproc");
+    assert.equal(coproc.name, undefined, source);
+    const command = nodeOfType(coproc.body, "Command");
+    assert.equal(command.name?.value, "foo", source);
+    assert.deepEqual(
+      command.suffix.filter((part) => part.type !== "Redirect").map((part) => nodeOfType(part, "Word").text),
+      expected,
+      source,
+    );
+    assert.equal(print(script), source, source);
+  }
+});
+
+test("coproc subscript arguments retain quoted and expanded parts", () => {
+  const source = 'coproc foo t["$x" y]=1';
+  const script = parse(source);
+  assert.equal(script.errors, undefined);
+  const command = nodeOfType(nodeOfType(script.commands[0].command, "Coproc").body, "Command");
+  const word = nodeOfType(command.suffix[0], "Word");
+  assert.deepEqual([word.text, word.value, word.pos, word.end], ['t["$x" y]=1', "t[$x y]=1", 11, 22]);
+  assert.deepEqual(
+    word.parts?.map((part) => [part.type, part.text]),
+    [
+      ["Literal", "t"],
+      ["Glob", '["$x" y]'],
+      ["Literal", "=1"],
+    ],
+  );
+  const bracket = nodeOfType(word.parts![1], "Glob");
+  assert.deepEqual(
+    bracket.parts?.map((part) => [part.type, part.text]),
+    [
+      ["DoubleQuoted", '"$x"'],
+      ["Literal", " y"],
+    ],
+  );
+  const quoted = nodeOfType(bracket.parts![0], "DoubleQuoted");
+  assert.deepEqual(
+    quoted.parts.map((part) => [part.type, part.text]),
+    [["SimpleExpansion", "$x"]],
+  );
+  assert.equal(print(script), source);
+  assert.deepEqual(JSON.parse(JSON.stringify(parse(print(script)))), JSON.parse(JSON.stringify(script)));
+});
+
+test("coproc declaration arguments keep assignments until an ordinary argument", () => {
+  const assignments = nodeOfType(
+    nodeOfType(parse("coproc declare a=1 t[a b]=1").commands[0].command, "Coproc").body,
+    "Command",
+  );
+  assert.deepEqual(
+    assignments.suffix.map((part) => nodeOfType(part, "Assignment").text),
+    ["a=1", "t[a b]=1"],
+  );
+  const words = nodeOfType(
+    nodeOfType(parse("coproc declare x t[a b]=1").commands[0].command, "Coproc").body,
+    "Command",
+  );
+  assert.deepEqual(
+    words.suffix.map((part) => nodeOfType(part, "Word").text),
+    ["x", "t[a", "b]=1"],
+  );
+  assert.ok(parse("function foo t[a b]").errors?.length);
+  assert.ok(parse("coproc foo() { :; }").errors?.length);
+});
+
+test("coproc array-shaped arguments materialize as words", () => {
+  const script = parse("coproc foo a=(x y)");
+  assert.equal(script.errors, undefined);
+  const command = nodeOfType(nodeOfType(script.commands[0].command, "Coproc").body, "Command");
+  const word = nodeOfType(command.suffix[0], "Word");
+  assert.deepEqual([word.text, word.value, word.pos, word.end, word.parts], ["a=(x y)", "a=(x y)", 11, 18, undefined]);
+  assert.equal(print(script), "coproc foo a=(x y)");
+});
+
+test("function lookahead after command arguments preserves those arguments", () => {
+  for (const prefix of ["", "coproc "]) {
+    const script = parse(`${prefix}foo a=1 () { :; }`);
+    assert.ok(script.errors?.length);
+    const first = script.commands[0].command;
+    const command = nodeOfType(first.type === "Coproc" ? first.body : first, "Command");
+    assert.equal(command.name?.text, "foo");
+    assert.deepEqual(
+      command.suffix.map((part) => nodeOfType(part, "Word").text),
+      ["a=1"],
+    );
+    assert.ok(print(script).startsWith(`${prefix}foo a=1`));
+  }
 });
 
 test("a coprocess name requires a compound command", () => {

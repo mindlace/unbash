@@ -757,7 +757,7 @@ class Parser {
       case Token.Word:
       case Token.Assignment:
       case Token.Redirect:
-        return this.simpleCommandOrFunction();
+        return this.simpleCommandOrFunction(false);
       default:
         return null;
     }
@@ -816,7 +816,7 @@ class Parser {
       }
     }
 
-    const cmd = this.command();
+    const cmd = first.token === Token.Word && name === undefined ? this.simpleCommandOrFunction(true) : this.command();
     if (cmd && cmd.type !== "Function" && cmd.type !== "Coproc") {
       return { type: "Coproc", pos, end: cmd.end, name, body: cmd };
     }
@@ -1408,7 +1408,7 @@ class Parser {
   }
 
   // simple_command or function_def (word '(' ')' body)
-  private simpleCommandOrFunction(): Command | Function {
+  private simpleCommandOrFunction(coproc: boolean): Command | Function {
     const prefix: Command["prefix"] = [];
     const cmdPos = this.tok.peek(LexContext.CommandStart).pos;
     let lastEnd = cmdPos;
@@ -1446,8 +1446,18 @@ class Parser {
         : LexContext.Normal;
     lastEnd = name.end;
 
+    const suffix: Command["suffix"] = [];
+    if (coproc) {
+      while (this.tok.peek(LexContext.CommandPrefix).token === Token.Assignment) {
+        const token = this.tok.next(LexContext.CommandPrefix);
+        const word = ctx === LexContext.Declaration ? this.parseAssignment(token) : this.toWord(token);
+        suffix.push(word);
+        lastEnd = word.end;
+      }
+    }
+
     // Check for function definition: word '(' ')' body
-    if (this.tok.peek(ctx).token === Token.LParen) {
+    if (this.tok.peek(ctx).token === Token.LParen && suffix.length === 0) {
       this.tok.next(LexContext.Normal);
       if (this.tok.peek(LexContext.Normal).token === Token.RParen) {
         this.tok.next(LexContext.Normal);
@@ -1462,8 +1472,6 @@ class Parser {
         } satisfies Function;
       }
     }
-
-    const suffix: Command["suffix"] = [];
 
     // Collect suffix words and redirects
     for (;;) {
