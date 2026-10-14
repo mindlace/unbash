@@ -400,9 +400,13 @@ test("negated conditions preserve multiple assignment prefixes (#318)", () => {
 
   for (const [source, end, assignments] of cases) {
     const ast = assertCommandGroups(source, [["If", 0, end]]);
-    const negation = (ast.commands[0].command as If).clause.commands[0].command;
-    assert.ok(negation.type === "Negation", source);
-    const command = negation.command as Command;
+    const negation = nodeOfType((ast.commands[0].command as If).clause.commands[0].command, "Pipeline");
+    assert.deepEqual(
+      negation.prefixes.map((prefix) => prefix.type),
+      ["Negation"],
+      source,
+    );
+    const command = negation.commands[0] as Command;
     assert.equal(command.type, "Command", source);
     assert.deepEqual(
       command.prefix.map((assignment) => [nodeOfType(assignment, "Assignment").name, assignment.pos, assignment.end]),

@@ -11,19 +11,25 @@ import {
   type CommandNode,
   type CompoundList,
   type Coproc,
+  type Elif,
   type ExtendedGlobPart,
   type Function,
   type GlobPart,
   type HereDoc,
+  type If,
   type ParameterOperation,
   type ParsedScript,
   type Pipeline,
+  type Negation,
   type PipelineNode,
+  type PipelinePrefix,
   type QuestionGlobPart,
   type Redirection,
   type Statement,
   type StarGlobPart,
   type SyntaxNode,
+  type TestLogicalExpression,
+  type TestNotExpression,
   type Time,
   type Word,
   type WordPart,
@@ -154,11 +160,21 @@ declare const functionDefinition: Function;
 declare const coprocess: Coproc;
 const pipelineElement: Pipeline["commands"][number] = command;
 const logicalElement: AndOr["commands"][number] = pipeline;
-const prefixedPipeline: PipelineNode = time;
-const prefixChild: Time["command"] = pipeline;
+declare const negation: Negation;
+const timePrefix: Pipeline["prefixes"][number] = time;
+const negationPrefix: Pipeline["prefixes"][number] = negation;
+const testNegation: TestNotExpression["negations"][number] = negation;
 const recoveredFunctionBody: Function["body"] = list;
 const recoveredCoprocBody: Coproc["body"] = list;
-void [pipelineElement, logicalElement, prefixedPipeline, prefixChild, recoveredFunctionBody, recoveredCoprocBody];
+void [
+  pipelineElement,
+  logicalElement,
+  timePrefix,
+  negationPrefix,
+  testNegation,
+  recoveredFunctionBody,
+  recoveredCoprocBody,
+];
 // @ts-expect-error statements cannot occur directly inside a pipeline
 const statementInPipeline: Pipeline["commands"][number] = statement;
 // @ts-expect-error logical lists cannot occur directly inside a pipeline
@@ -169,8 +185,8 @@ const timingInPipeline: Pipeline["commands"][number] = time;
 const pipelineInPipeline: Pipeline["commands"][number] = pipeline;
 // @ts-expect-error logical lists do not nest directly
 const logicalInLogical: AndOr["commands"][number] = andOr;
-// @ts-expect-error timing cannot wrap a logical list
-const logicalPrefix: Time["command"] = andOr;
+// @ts-expect-error a prefix is a record, not a pipeline node
+const prefixAsNode: PipelineNode = time;
 // @ts-expect-error a function body is a compound command, never a simple command
 const commandAsFunctionBody: Function["body"] = simpleCommand;
 // @ts-expect-error a function definition cannot be a function body
@@ -185,7 +201,7 @@ void [
   timingInPipeline,
   pipelineInPipeline,
   logicalInLogical,
-  logicalPrefix,
+  prefixAsNode,
   commandAsFunctionBody,
   functionAsFunctionBody,
   coprocAsCoprocBody,
@@ -197,6 +213,25 @@ simpleCommand.args.push(word);
 simpleCommand.redirects.pop();
 // @ts-expect-error derived views are readonly
 simpleCommand.args = [];
+
+declare const ifCommand: If;
+declare const elif: Elif;
+declare const testLogical: TestLogicalExpression;
+const elseBody: CompoundList | undefined = ifCommand.else;
+const elifBranches: readonly Elif[] | undefined = ifCommand.elif;
+void [elseBody, elifBranches];
+// @ts-expect-error elif branches are readonly collections
+ifCommand.elif?.push(elif);
+// @ts-expect-error elif fields are readonly
+elif.end = 0;
+// @ts-expect-error elif nodes do not own later branches
+void elif.else;
+// @ts-expect-error logical operands are readonly collections
+testLogical.operands.pop();
+// @ts-expect-error logical tests no longer expose a binary left child
+void testLogical.left;
+// @ts-expect-error logical tests no longer expose a binary right child
+void testLogical.right;
 
 type ExpectedSyntaxKind =
   | "Script"
@@ -210,6 +245,7 @@ type ExpectedSyntaxKind =
   | "Negation"
   | "AndOr"
   | "If"
+  | "Elif"
   | "For"
   | "ArithmeticFor"
   | "Select"
@@ -282,6 +318,13 @@ type CommandViews = [
 ];
 declare const commandViews: CommandViews;
 void commandViews;
+type SequenceLists = [
+  AssertTrue<Equals<If["elif"], readonly Elif[]>>,
+  AssertTrue<Equals<Pipeline["prefixes"], readonly PipelinePrefix[]>>,
+  AssertTrue<Equals<TestNotExpression["negations"], readonly Negation[]>>,
+];
+declare const sequenceLists: SequenceLists;
+void sequenceLists;
 type MissingSyntax = AssertNever<Exclude<ExpectedSyntaxKind, SyntaxNode["type"]>>;
 type ExtraSyntax = AssertNever<Exclude<SyntaxNode["type"], ExpectedSyntaxKind>>;
 type IsUnion<T, Whole = T> = T extends Whole ? ([Whole] extends [T] ? false : true) : never;

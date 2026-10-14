@@ -13,6 +13,7 @@ import type {
 } from "./internal-types.ts";
 import { decodeAnsiCQuoted } from "./ansi-c.ts";
 import { parseArithmeticExpression } from "./arithmetic.ts";
+import { MAX_SYNTAX_NESTING } from "./limits.ts";
 import { WordImpl } from "./word.ts";
 import type { SubstitutionContext } from "./substitution-context.ts";
 import { hasGlobCharacters, parseGlobParts } from "./glob.ts";
@@ -59,19 +60,7 @@ import {
   CH_RBRACE,
 } from "./chars.ts";
 
-export { skipLineContinuations } from "./chars.ts";
-
 type SubFieldContext = "word" | "quoted" | "embedded";
-
-// Shared nesting budget for compound syntax and for structure materialized on demand
-// (sub-field words, nested substitution scripts). 256 nested levels stay lossless; past
-// that the lexer stops descending instead of overflowing the stack: deeper sub-fields
-// keep their raw text without parts, and substitution scripts stay unresolved past one
-// boundary script flagged with "maximum substitution nesting depth exceeded". The
-// iterative scanners additionally report the depth error where their counters can see
-// it (nested `${`, `$((`, and `$(`); cut-offs those counters cannot see (e.g. chains
-// interleaved with double quotes) degrade to plain text without an error.
-export const MAX_SYNTAX_NESTING = 256;
 
 export const Token = {
   Word: 0,
@@ -1209,7 +1198,6 @@ export class Lexer {
     ) {
       this.pos = startPos + 2;
       const inner = this.extractBalanced();
-      if (this._unbalanced) this.errors.push({ message: "unterminated process substitution", pos: startPos });
       const text = this.src.slice(startPos, this.pos);
       const part: import("./internal-types.ts").ProcessSubstitutionPart = {
         type: "ProcessSubstitution",
@@ -1315,7 +1303,7 @@ export class Lexer {
         continue;
       }
 
-      if (ch === 0x24 /* $ */) {
+      if (ch === 0x24 /* $ */ && src.charCodeAt(i + 1) !== CH_SQUOTE && src.charCodeAt(i + 1) !== CH_DQUOTE) {
         flushLit();
         litStart = i;
         this.pos = i;
@@ -2875,8 +2863,7 @@ export class Lexer {
   // source, so every sub-field offset maps straight back.
   private parseSubFieldWord(start: number, end: number, context: SubFieldContext = "word", arithmetic = false): Word {
     if (start >= end) return new WordImpl("", start, start);
-    // Sub-fields nest through readInnerWordText (nested expansions, arithmetic embedded
-    // words); once the shared budget is spent, keep the raw span as an unstructured word.
+    // Past the shared budget the sub-field keeps its raw text without parts.
     if (this._nestingDepth >= MAX_SYNTAX_NESTING) return new WordImpl(this.src.slice(start, end), start, end);
     this._nestingDepth++;
     const savedEnd = this.srcEnd;
@@ -2919,69 +2906,32 @@ export class Lexer {
     if (!result.closed) this.errors.push({ message: "unterminated ANSI-C quote", pos: quotePos });
   }
 
+  // Plain quoted text is skipped here; the first `$(`, `${`, `$$`, backtick or the end of input
+  // hands the rest to the quote scanner, which owns substitution and nesting-limit decisions.
   private skipDQ(): void {
     const src = this.src;
     const len = this.srcEnd;
-    while (this.pos < len) {
-      const ch = src.charCodeAt(this.pos);
-      if (ch === CH_DQUOTE) {
-        this.pos++;
-        return;
-      }
-      if (ch === CH_BACKSLASH) {
-        this.pos += 2;
-        continue;
-      }
-      if (ch === CH_DOLLAR && this.pos + 1 < len) {
-        const next = src.charCodeAt(this.pos + 1);
-        if (next === CH_LPAREN) {
-          const csStart = this.pos;
-          this.pos += 2;
-          this.extractBalanced();
-          if (this._unbalanced) this.errors.push({ message: "unterminated command substitution", pos: csStart });
-          continue;
-        }
-        if (next === CH_LBRACE) {
-          this.pos += 2;
-          let d = 1;
-          while (this.pos < len && d > 0) {
-            const c = src.charCodeAt(this.pos);
-            if (c === CH_RBRACE) {
-              if (--d === 0) {
-                this.pos++;
-                break;
-              }
-            } else if (c === CH_DOLLAR && this.pos + 1 < len) {
-              const next = src.charCodeAt(this.pos + 1);
-              if (next === CH_LBRACE) d++;
-              if (next === CH_LBRACE || next === CH_DOLLAR) this.pos++;
-            } else if (c === CH_BACKSLASH) {
-              this.pos++;
-            } else if (c === CH_SQUOTE) {
-              this.pos++;
-              this.skipSQ();
-              continue;
-            } else if (c === CH_DQUOTE) {
-              this.pos++;
-              this.skipDQ();
-              continue;
-            }
-            this.pos++;
-          }
-          continue;
-        }
-      }
-      if (ch === CH_BACKTICK) {
-        this.pos++;
-        while (this.pos < len && src.charCodeAt(this.pos) !== CH_BACKTICK) {
-          if (src.charCodeAt(this.pos) === CH_BACKSLASH) this.pos++;
+    this._unbalanced = false;
+    if (this._nestingDepth < MAX_SYNTAX_NESTING) {
+      while (this.pos < len) {
+        const ch = src.charCodeAt(this.pos);
+        if (ch === CH_DQUOTE) {
           this.pos++;
+          return;
         }
-        if (this.pos < len) this.pos++;
-        continue;
+        if (ch === CH_BACKSLASH) {
+          this.pos = Math.min(this.pos + 2, len);
+          continue;
+        }
+        if (ch === CH_BACKTICK) break;
+        if (ch === CH_DOLLAR) {
+          const next = src.charCodeAt(this.pos + 1);
+          if (next === CH_LPAREN || next === CH_LBRACE || next === CH_DOLLAR) break;
+        }
+        this.pos++;
       }
-      this.pos++;
     }
+    this.extractBalanced(true, true);
   }
 
   private skipSpacesAndTabs(): void {
@@ -3279,6 +3229,7 @@ export class Lexer {
     // $[ expr ] is bash's deprecated spelling of $(( expr )). It runs to the matching ']',
     // so parentheses inside belong to the expansion instead of ending the word.
     if (ch === CH_LBRACKET) {
+      const errorCount = this._errors === null ? 0 : this._errors.length;
       const close = this.findClosingArithmeticBracket(this.pos + 1);
       if (close !== -1) {
         const bodyStart = this.pos + 1;
@@ -3299,6 +3250,8 @@ export class Lexer {
           : undefined;
         return;
       }
+      // A failed lookahead leaves `$` literal and the token path re-reads the scanned text.
+      if (this._errors !== null) this._errors.length = errorCount;
     }
 
     this._resultText = "$";
@@ -3315,7 +3268,6 @@ export class Lexer {
     let parenDepth = 0;
     let parentParenDepth = 0;
     let parenDepths: number[] | undefined;
-    let expansions = 0;
     let reported = false;
     const src = this.src;
     const len = this.srcEnd;
@@ -3359,17 +3311,19 @@ export class Lexer {
           else (parenDepths ?? (parenDepths = [])).push(parenDepth);
           depth++;
           parenDepth = 0;
-          // Nested $((...)) — count it against the shared budget (the expansion this scan
-          // belongs to is level one, hence >=) so over-deep chains surface a parse error.
-          if (++expansions + this._nestingDepth >= MAX_SYNTAX_NESTING) {
-            if (!reported) {
-              this.errors.push({ message: "maximum arithmetic expansion nesting depth exceeded", pos: this.pos - 1 });
-              reported = true;
-            }
+          if (depth + this._nestingDepth > MAX_SYNTAX_NESTING && !reported) {
+            this.errors.push({ message: "maximum arithmetic expansion nesting depth exceeded", pos: this.pos - 1 });
+            reported = true;
           }
           this.pos += 2;
         } else {
-          parenDepth++;
+          // The expression parser stops building structure at this depth; report it here, while
+          // scanning, since the expression itself resolves lazily. Each enclosing `$((` of this
+          // scan parses one level deeper, so its parentheses count from there.
+          if (++parenDepth + depth - 1 + this._nestingDepth > MAX_SYNTAX_NESTING && !reported) {
+            this.errors.push({ message: "maximum arithmetic expression nesting depth exceeded", pos: this.pos });
+            reported = true;
+          }
           this.pos++;
         }
       } else if (c === CH_RPAREN && parenDepth > 0) {
@@ -3428,20 +3382,25 @@ export class Lexer {
     bodyStart: number,
   ): import("./internal-types.ts").ArithmeticExpression | undefined {
     if (!hasEmbeddedWordStructure(this.src, bodyStart, bodyStart + body.length)) {
-      return parseArithmeticExpression(body, bodyStart) ?? undefined;
+      return parseArithmeticExpression(body, bodyStart, undefined, this._nestingDepth) ?? undefined;
     }
     const commandExpansions: import("./internal-types.ts").ArithmeticCommandExpansion[] = [];
     const embeddedWords: import("./internal-types.ts").ArithmeticWord[] = [];
     const expr =
-      parseArithmeticExpression(body, bodyStart, {
-        commandExpansions,
-        embeddedWords,
-        findClosingBracket: (start, end) => this.findClosingBracket(start, end),
-        findClosingBrace: (start, end) => this.findClosingBrace(start, end),
-        findClosingParenthesis: (start, end) => this.findClosingParenthesis(start, end),
-        findArithmeticExpansionEnd: (start, end) => this.findArithmeticExpansionEnd(start, end),
-        findArithmeticWordEnd: (start, end) => this.findArithmeticWordEnd(start, end),
-      }) ?? undefined;
+      parseArithmeticExpression(
+        body,
+        bodyStart,
+        {
+          commandExpansions,
+          embeddedWords,
+          findClosingBracket: (start, end) => this.findClosingBracket(start, end),
+          findClosingBrace: (start, end) => this.findClosingBrace(start, end),
+          findClosingParenthesis: (start, end) => this.findClosingParenthesis(start, end),
+          findArithmeticExpansionEnd: (start, end) => this.findArithmeticExpansionEnd(start, end),
+          findArithmeticWordEnd: (start, end) => this.findArithmeticWordEnd(start, end),
+        },
+        this._nestingDepth,
+      ) ?? undefined;
     for (const node of commandExpansions) {
       this.collect(node, node.text.slice(2, -1), node.pos + 2, true);
     }
@@ -3955,15 +3914,15 @@ export class Lexer {
     return result.value;
   }
 
-  // Extract balanced parens for $(...) — respects nested quotes and case..esac
-  private extractBalanced(useGrammar = true): string {
+  // Quotes resume when a nested substitution returns to their parenthesis depth.
+  private extractBalanced(useGrammar = true, quoteOnly = false): string {
     const src = this.src;
     const len = this.srcEnd;
     const bt = this._buildParts || this._buildValue;
-    let depth = 1;
+    let depth = quoteOnly ? 0 : 1;
     const start = this.pos;
     this._unbalanced = false;
-    const knownEnd = useGrammar ? this.getSubstitutionContext()?.boundaries.get(start) : undefined;
+    const knownEnd = useGrammar && !quoteOnly ? this.getSubstitutionContext()?.boundaries.get(start) : undefined;
     if (knownEnd !== undefined && knownEnd <= len && this._nestingDepth < MAX_SYNTAX_NESTING) {
       this.pos = knownEnd;
       return bt ? src.slice(start, knownEnd - 1) : "";
@@ -3973,7 +3932,7 @@ export class Lexer {
     // Fast path: scan for simple cases with no nested quotes/parens/case. Nothing here
     // opens a paren — `(` breaks to the slow path — so depth stays 1 and the first `)`
     // closes the construct.
-    while (this.pos < len) {
+    while (!quoteOnly && this.pos < len) {
       const c = src.charCodeAt(this.pos);
       if (c === CH_RPAREN) {
         const result = bt ? src.slice(start, this.pos) : "";
@@ -4012,6 +3971,7 @@ export class Lexer {
     type Delimiter = { delimiter: string; strip: boolean; quoted: boolean };
     type ScriptScope = {
       start: number;
+      dollar: number;
       depth: number;
       parens: number;
       caseDepth: number;
@@ -4034,13 +3994,89 @@ export class Lexer {
       src.charCodeAt(start - 2) === CH_DOLLAR;
     let substitutions = 0;
     let reported = false;
+    type QuoteScope = { close: number; depth: number };
+    const quotes: QuoteScope[] = quoteOnly ? [{ close: CH_DQUOTE, depth: 0 }] : [];
+    let quotedDepth = quoteOnly ? 1 : 0;
+    let parameterDepth = 0;
+    let arithmeticOpens: number[] | undefined;
     let continuedDollarPos = -1;
     let continuedParenPos = -1;
+    let escapedEnd = -1;
     let lastParenEnd = -1;
     let checkedGrammar = false;
 
-    while (this.pos < len && depth > 0) {
+    while (this.pos < len && (depth > 0 || quotes.length > 0)) {
       let ch = src.charCodeAt(this.pos);
+      // A negative index would leave V8's fast array path, so guard the empty stack.
+      const quote = quotes.length === 0 ? undefined : quotes[quotes.length - 1];
+      if (quote !== undefined && quote.depth === depth) {
+        let commandOpen = false;
+        if (ch === CH_BACKSLASH) {
+          this.pos = Math.min(this.pos + 2, len);
+          continue;
+        }
+        if (ch === quote.close) {
+          quotes.pop();
+          if (ch === CH_DQUOTE) quotedDepth--;
+          else parameterDepth--;
+          this.pos++;
+          if (quoteOnly && depth === 0 && quotes.length === 0) return "";
+          continue;
+        }
+        if (ch === CH_DQUOTE) {
+          quotes.push({ close: CH_DQUOTE, depth });
+          quotedDepth++;
+        } else if (ch === CH_SQUOTE && quote.close === CH_RBRACE) {
+          this.pos++;
+          this.skipSQ();
+          continue;
+        } else if (ch === CH_BACKTICK) {
+          this.pos++;
+          while (this.pos < len && src.charCodeAt(this.pos) !== CH_BACKTICK) {
+            if (src.charCodeAt(this.pos) === CH_BACKSLASH) this.pos++;
+            if (this.pos < len) this.pos++;
+          }
+          if (this.pos < len) this.pos++;
+          continue;
+        } else if (ch === CH_DOLLAR) {
+          const next = src.charCodeAt(this.pos + 1);
+          if (next === CH_LBRACE) {
+            quotes.push({ close: CH_RBRACE, depth });
+            parameterDepth++;
+            this.pos++;
+          } else if (next === CH_LPAREN) {
+            this.pos++;
+            ch = CH_LPAREN;
+            commandOpen = true;
+          } else if (next === CH_DOLLAR) {
+            // `$$` is one parameter unless `(` follows: Bash's quote scanner then reads `$` + `$(`.
+            this.pos += src.charCodeAt(this.pos + 2) === CH_LPAREN ? 1 : 2;
+            continue;
+          }
+        }
+        if (!reported && this._nestingDepth + Math.max(quotedDepth, parameterDepth) > MAX_SYNTAX_NESTING) {
+          this.errors.push({ message: "maximum word nesting depth exceeded", pos: this.pos });
+          reported = true;
+        }
+        if (!commandOpen) {
+          // Plain text changes no depth, so the rest of the run needs no further checks.
+          this.pos++;
+          while (this.pos < len) {
+            const c = src.charCodeAt(this.pos);
+            if (
+              c === CH_BACKSLASH ||
+              c === CH_DQUOTE ||
+              c === CH_DOLLAR ||
+              c === CH_BACKTICK ||
+              c === CH_RBRACE ||
+              c === CH_SQUOTE
+            )
+              break;
+            this.pos++;
+          }
+          continue;
+        }
+      }
       // The grammar resolves whether '#' after ')' is a comment, including inside array subscripts.
       if (
         ch === CH_HASH &&
@@ -4074,7 +4110,8 @@ export class Lexer {
         }
       }
       if (ch === CH_LPAREN) {
-        const prev = this.pos > start ? src.charCodeAt(this.pos - 1) : 0;
+        // An escaped character (`\$(`) is text, not a substitution or extglob prefix.
+        const prev = this.pos > start && this.pos !== escapedEnd ? src.charCodeAt(this.pos - 1) : 0;
         const commandDollarPos =
           prev === CH_DOLLAR ? this.pos - 1 : this.pos === continuedParenPos ? continuedDollarPos : -1;
         const wordParen =
@@ -4095,6 +4132,7 @@ export class Lexer {
         if (script) {
           (scripts ?? (scripts = [])).push({
             start: this.pos + 1,
+            dollar: commandDollarPos,
             depth,
             parens: wordStartAfterParen.length,
             caseDepth,
@@ -4119,10 +4157,14 @@ export class Lexer {
         if (!script && arithBase < 0 && this.pos + 1 < len && src.charCodeAt(this.pos + 1) === CH_LPAREN) {
           arithBase = depth;
         }
-        // Nested $( — count it against the shared budget (the substitution being
-        // scanned is level one, hence >=) so over-deep chains surface a parse error.
-        if (commandDollarPos !== -1 && ++substitutions + this._nestingDepth >= MAX_SYNTAX_NESTING) {
-          if (!reported) {
+        if (commandDollarPos !== -1) {
+          if (script) substitutions++;
+          else (arithmeticOpens ?? (arithmeticOpens = [])).push(depth);
+          if (
+            substitutions + (arithmeticOpens?.length ?? 0) + this._nestingDepth + (quoteOnly ? 0 : 1) >
+              MAX_SYNTAX_NESTING &&
+            !reported
+          ) {
             this.errors.push({ message: "maximum command substitution nesting depth exceeded", pos: commandDollarPos });
             reported = true;
           }
@@ -4139,12 +4181,16 @@ export class Lexer {
         } else {
           if (caseDepth > 0) caseParens--;
           depth--;
-          if (depth === 0) {
+          if (depth === 0 && !quoteOnly) {
             const result = bt ? src.slice(start, this.pos) : "";
             this.pos++;
             return result;
           }
           if (depth <= arithBase) arithBase = -1;
+          if (arithmeticOpens !== undefined) {
+            while (arithmeticOpens.length > 0 && arithmeticOpens[arithmeticOpens.length - 1] >= depth)
+              arithmeticOpens.pop();
+          }
           wordStart = wordStartAfterParen.pop() ?? true;
           this.pos++;
           const scope = scripts?.[scripts.length - 1];
@@ -4179,13 +4225,15 @@ export class Lexer {
           }
           this.pos++;
         }
+        escapedEnd = this.pos;
       } else if (ch === CH_SQUOTE) {
         this.pos++;
         this.skipSQ();
         wordStart = false;
       } else if (ch === CH_DQUOTE) {
+        quotes.push({ close: CH_DQUOTE, depth });
+        quotedDepth++;
         this.pos++;
-        this.skipDQ();
         wordStart = false;
       } else if (ch === CH_BACKTICK) {
         this.pos++;
@@ -4262,8 +4310,12 @@ export class Lexer {
         }
       }
     }
-    // Ran out of input before the closing paren.
+    // Ran out of input before the closing paren. A quoted scan owns the `$(` it opened: the
+    // outermost one left open is reported here, since no token read revisits this text.
     this._unbalanced = true;
+    if (quoteOnly && scripts !== undefined && scripts.length > 0) {
+      this.errors.push({ message: "unterminated command substitution", pos: scripts[0].dollar });
+    }
     return bt ? src.slice(start, this.pos) : "";
   }
 }

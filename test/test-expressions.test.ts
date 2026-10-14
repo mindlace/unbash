@@ -82,8 +82,8 @@ test("unary -s -L -S -b -c -p -t -v", () => {
 test("unary -o shell option", () => {
   const t = getTest("[[ -o emacs && -v b ]]");
   assert.equal(logical(t.expression).operator, "&&");
-  assert.equal(unary(logical(t.expression).left).operator, "-o");
-  assert.equal(unary(logical(t.expression).left).operand.text, "emacs");
+  assert.equal(unary(logical(t.expression).operands[0]).operator, "-o");
+  assert.equal(unary(logical(t.expression).operands[0]).operand.text, "emacs");
 });
 
 // --- Binary tests ---
@@ -128,9 +128,9 @@ test("quoted ! in a test is an operand, not negation", () => {
 
 test("unquoted ! still negates", () => {
   assert.equal(getTest("[[ ! -f /etc/hosts ]]").expression.type, "TestNot");
-  const doubled = getTest("[[ ! ! -f /etc/hosts ]]").expression;
-  assert.equal(doubled.type, "TestNot");
-  assert.equal(not(doubled).operand.type, "TestNot");
+  const doubled = not(getTest("[[ ! ! -f /etc/hosts ]]").expression);
+  assert.equal(doubled.negations.length, 2);
+  assert.equal(doubled.operand.type, "TestUnary");
 });
 
 test("]] outside a test command is an ordinary word", () => {
@@ -292,14 +292,14 @@ test("binary =~ splits at depth-zero && into logical AND", () => {
   assert.equal(t.expression.type, "TestLogical");
   const l = logical(t.expression);
   assert.equal(l.operator, "&&");
-  assert.equal(binary(l.left).operator, "=~");
-  assert.equal(binary(l.left).right.text, "(a)");
-  assert.equal(l.right.type, "TestGroup");
-  assert.equal(unary(group(l.right).expression).operand.text, "zzz");
+  assert.equal(binary(l.operands[0]).operator, "=~");
+  assert.equal(binary(l.operands[0]).right.text, "(a)");
+  assert.equal(l.operands[1].type, "TestGroup");
+  assert.equal(unary(group(l.operands[1]).expression).operand.text, "zzz");
 
   const bare = getTest("[[ ab =~ a&&b ]]");
   assert.equal(bare.expression.type, "TestLogical");
-  assert.equal(binary(logical(bare.expression).left).right.text, "a");
+  assert.equal(binary(logical(bare.expression).operands[0]).right.text, "a");
 });
 
 test("binary =~ regex ends at test group close", () => {
@@ -317,7 +317,7 @@ test("binary =~ regex ends at test group close", () => {
   }
   const t = getTest("[[ ( abc =~ (b|c) ) && d ]]");
   assert.equal(t.expression.type, "TestLogical");
-  assert.equal(binary(group(logical(t.expression).left).expression).right.text, "(b|c)");
+  assert.equal(binary(group(logical(t.expression).operands[0]).expression).right.text, "(b|c)");
 });
 
 test("binary =~ regex ends at depth-zero delimiters", () => {
@@ -348,7 +348,7 @@ test("binary =~ empty operand before group close or operator", () => {
 
   const logicalT = getTest("[[ x =~ && y ]]");
   assert.equal(logicalT.expression.type, "TestLogical");
-  assert.equal(binary(logical(logicalT.expression).left).right.text, "");
+  assert.equal(binary(logical(logicalT.expression).operands[0]).right.text, "");
 
   const ast = parse("[[ x =~ ]]");
   assert.notEqual(ast.errors, undefined);
@@ -460,8 +460,8 @@ test("logical && (AND)", () => {
   const t = getTest("[[ -f $file && -r $file ]]");
   assert.equal(t.expression.type, "TestLogical");
   assert.equal(logical(t.expression).operator, "&&");
-  assert.equal(unary(logical(t.expression).left).operator, "-f");
-  assert.equal(unary(logical(t.expression).right).operator, "-r");
+  assert.equal(unary(logical(t.expression).operands[0]).operator, "-f");
+  assert.equal(unary(logical(t.expression).operands[1]).operator, "-r");
 });
 
 test("logical || (OR)", () => {
@@ -472,16 +472,17 @@ test("logical || (OR)", () => {
 test("&& chains", () => {
   const t = getTest("[[ -f $file && -r $file && -s $file ]]");
   assert.equal(logical(t.expression).operator, "&&");
-  // Left-associative: ((-f && -r) && -s)
-  assert.equal(logical(logical(t.expression).left).operator, "&&");
-  assert.equal(unary(logical(t.expression).right).operator, "-s");
+  assert.deepEqual(
+    logical(t.expression).operands.map((operand) => unary(operand).operator),
+    ["-f", "-r", "-s"],
+  );
 });
 
 test("|| has lower precedence than &&", () => {
   const t = getTest('[[ $str == hello && $num -eq 42 || $empty == "" ]]');
   // (str == hello && num -eq 42) || (empty == "")
   assert.equal(logical(t.expression).operator, "||");
-  assert.equal(logical(logical(t.expression).left).operator, "&&");
+  assert.equal(logical(logical(t.expression).operands[0]).operator, "&&");
 });
 
 // --- Negation ---
@@ -494,9 +495,8 @@ test("negation !", () => {
 
 test("double negation", () => {
   const t = getTest("[[ ! ! -f $file ]]");
-  assert.equal(t.expression.type, "TestNot");
-  assert.equal(not(t.expression).operand.type, "TestNot");
-  assert.equal(unary(not(not(t.expression).operand).operand).operator, "-f");
+  assert.equal(not(t.expression).negations.length, 2);
+  assert.equal(unary(not(t.expression).operand).operator, "-f");
 });
 
 test("negation with logical", () => {
@@ -510,15 +510,15 @@ test("negation with logical", () => {
 test("grouped expression", () => {
   const t = getTest("[[ ( -f $file || -d $file ) && -r $file ]]");
   assert.equal(logical(t.expression).operator, "&&");
-  assert.equal(logical(t.expression).left.type, "TestGroup");
-  const inner = group(logical(t.expression).left).expression;
+  assert.equal(logical(t.expression).operands[0].type, "TestGroup");
+  const inner = group(logical(t.expression).operands[0]).expression;
   assert.equal(logical(inner).operator, "||");
 });
 
 test("nested grouping", () => {
   const t = getTest("[[ -d $dir && ( -w $dir || -x $dir ) ]]");
   assert.equal(logical(t.expression).operator, "&&");
-  assert.equal(logical(t.expression).right.type, "TestGroup");
+  assert.equal(logical(t.expression).operands[1].type, "TestGroup");
 });
 
 // --- Standalone word ---
@@ -710,7 +710,7 @@ test("unary operator without an operand reports an error (Bash 5.3 rejects it)",
     ["[[ -f ]]", "-f", 5, (e: TestExpression) => e],
     ["[[ -n ]]", "-n", 5, (e: TestExpression) => e],
     ["[[ ! -z ]]", "-z", 7, (e: TestExpression) => not(e).operand],
-    ["[[ -f && -n x ]]", "-f", 5, (e: TestExpression) => logical(e).left],
+    ["[[ -f && -n x ]]", "-f", 5, (e: TestExpression) => logical(e).operands[0]],
   ] as const) {
     const ast = parse(source);
     assert.deepEqual(ast.errors, [{ message: "expected operand after unary test operator", pos }], source);

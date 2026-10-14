@@ -900,7 +900,7 @@ test("arithmetic for headers preserve substitution comment boundaries", () => {
   assert.equal(expansion.script?.errors, undefined);
   assert.deepEqual(
     expansion.script?.commands.map((statement) => statement.command.type),
-    ["Negation", "Command"],
+    ["Pipeline", "Command"],
   );
   assert.equal(nodeOfType(loop.test, "ArithmeticBinary").operator, "<");
   assert.equal(nodeOfType(loop.update, "ArithmeticUnary").operator, "++");

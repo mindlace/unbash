@@ -176,7 +176,7 @@ test("pipeline with time", () => {
   const src = "time echo hello | cat";
   const ast = parse(src);
   const pipe = ast.commands[0].command;
-  assert.equal(pipe.type, "Time");
+  assert.equal(pipe.type, "Pipeline");
   assert.equal(slice(src, pipe), src);
 });
 
@@ -184,7 +184,7 @@ test("pipeline with negation", () => {
   const src = "! echo hello | cat";
   const ast = parse(src);
   const pipe = ast.commands[0].command;
-  assert.equal(pipe.type, "Negation");
+  assert.equal(pipe.type, "Pipeline");
   assert.equal(slice(src, pipe), src);
 });
 
@@ -356,11 +356,8 @@ function walkNode(node: SyntaxNode, source: string, path: string) {
         walkRedirect(node.redirects[i], source, `${path}.redirects[${i}]`);
       break;
     case "Pipeline":
+      for (let i = 0; i < node.prefixes.length; i++) walkNode(node.prefixes[i], source, `${path}.prefixes[${i}]`);
       for (let i = 0; i < node.commands.length; i++) walkNode(node.commands[i], source, `${path}.commands[${i}]`);
-      break;
-    case "Time":
-    case "Negation":
-      if (node.command) walkNode(node.command, source, `${path}.command`);
       break;
     case "AndOr":
       for (let i = 0; i < node.commands.length; i++) walkNode(node.commands[i], source, `${path}.commands[${i}]`);
@@ -368,10 +365,12 @@ function walkNode(node: SyntaxNode, source: string, path: string) {
     case "If":
       walkCompoundList(node.clause, source, `${path}.clause`);
       walkCompoundList(node.then, source, `${path}.then`);
-      if (node.else) {
-        if (node.else.type === "If") walkNode(node.else, source, `${path}.else`);
-        else walkCompoundList(node.else, source, `${path}.else`);
-      }
+      for (let i = 0; i < node.elif.length; i++) walkNode(node.elif[i], source, `${path}.elif[${i}]`);
+      if (node.else) walkCompoundList(node.else, source, `${path}.else`);
+      break;
+    case "Elif":
+      walkCompoundList(node.clause, source, `${path}.clause`);
+      walkCompoundList(node.then, source, `${path}.then`);
       break;
     case "For":
       walkWord(node.name, source, `${path}.name`);
@@ -458,10 +457,11 @@ function walkTestExpr(te: import("../src/types.ts").TestExpression, source: stri
       walkWord(te.right, source, `${path}.right`);
       break;
     case "TestLogical":
-      walkTestExpr(te.left, source, `${path}.left`);
-      walkTestExpr(te.right, source, `${path}.right`);
+      for (let i = 0; i < te.operands.length; i++) walkTestExpr(te.operands[i], source, `${path}.operands[${i}]`);
       break;
     case "TestNot":
+      for (const negation of te.negations)
+        assert.ok(negation.pos >= te.pos && negation.end <= te.operand.pos, `${path}.negations`);
       walkTestExpr(te.operand, source, `${path}.operand`);
       break;
     case "TestGroup":

@@ -8,8 +8,8 @@ import { WordImpl } from "../src/word.ts";
 function markers(source: string): [string, string][] {
   const ast = parse(source);
   const result: [string, string][] = [];
-  JSON.stringify(ast, (_key, value) => {
-    if (value?.type === "Script") assert.equal(value.errors, undefined, source);
+  JSON.stringify(ast, (key, value) => {
+    if (key === "errors") assert.equal(value, undefined, source);
     if (value?.type === "Glob" || value?.type === "ExtendedGlob") result.push([value.type, value.text]);
     return value;
   });
@@ -90,7 +90,8 @@ test("glob resolution preserves default Bash function and negation structure", (
     ["Literal", "Glob"],
   );
   const body = nodeOfType(fn.body, "BraceGroup");
-  assert.equal(body.body.commands[0].command.type, "Negation");
+  const negated = nodeOfType(body.body.commands[0].command, "Pipeline");
+  assert.equal(negated.prefixes[0].type, "Negation");
   assert.deepEqual(markers(source), [
     ["Glob", "*"],
     ["Glob", "*"],

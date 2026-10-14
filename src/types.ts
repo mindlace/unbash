@@ -394,15 +394,18 @@ export type PipeOperator = "|" | "|&";
 
 export type CommandNode = Command | CompoundCommand | Redirected | Function | Coproc;
 
-export type PipelineNode = CommandNode | Pipeline | Time | Negation;
+export type PipelineNode = CommandNode | Pipeline;
 
 export interface Pipeline {
   readonly type: "Pipeline";
   readonly pos: number;
   readonly end: number;
+  readonly prefixes: readonly PipelinePrefix[];
   readonly commands: readonly CommandNode[];
   readonly operators: readonly PipeOperator[];
 }
+
+export type PipelinePrefix = Time | Negation;
 
 export interface Time {
   readonly type: "Time";
@@ -411,15 +414,12 @@ export interface Time {
   readonly keywordEnd: number;
   readonly posix: { readonly pos: number; readonly end: number } | undefined;
   readonly endOfOptions: { readonly pos: number; readonly end: number } | undefined;
-  readonly command: PipelineNode | undefined;
 }
 
 export interface Negation {
   readonly type: "Negation";
   readonly pos: number;
   readonly end: number;
-  readonly keywordEnd: number;
-  readonly command: PipelineNode | undefined;
 }
 
 export type LogicalOperator = "&&" | "||";
@@ -438,7 +438,16 @@ export interface If {
   readonly end: number;
   readonly clause: CompoundList;
   readonly then: CompoundList;
-  readonly else: CompoundList | If | undefined;
+  readonly elif: readonly Elif[];
+  readonly else: CompoundList | undefined;
+}
+
+export interface Elif {
+  readonly type: "Elif";
+  readonly pos: number;
+  readonly end: number;
+  readonly clause: CompoundList;
+  readonly then: CompoundList;
 }
 
 export interface For {
@@ -567,14 +576,14 @@ export interface TestLogicalExpression {
   readonly pos: number;
   readonly end: number;
   readonly operator: "&&" | "||";
-  readonly left: TestExpression;
-  readonly right: TestExpression;
+  readonly operands: readonly TestExpression[];
 }
 
 export interface TestNotExpression {
   readonly type: "TestNot";
   readonly pos: number;
   readonly end: number;
+  readonly negations: readonly Negation[];
   readonly operand: TestExpression;
 }
 
@@ -613,7 +622,9 @@ export type SyntaxNode =
   | Statement
   | CompoundList
   | CaseItem
+  | Elif
   | PipelineNode
+  | PipelinePrefix
   | AndOr
   | Word
   | WordPart

@@ -137,7 +137,7 @@ test("quoted defaults preserve ambiguous substitution boundaries", () => {
   assert.equal(expansion.script?.errors, undefined);
   assert.deepEqual(
     expansion.script?.commands.map((statement) => statement.command.type),
-    ["Negation", "Command"],
+    ["Pipeline", "Command"],
   );
   assert.equal(nodeOfType(getCmd(expansion.script!, 1).args[0], "Word").value, "after");
   assert.equal(nodeOfType(command.args[1], "Word").value, "tail");

@@ -12,7 +12,6 @@ import type {
   For,
   Function,
   If,
-  Negation,
   PipelineNode,
   Pipeline,
   HereDoc,
@@ -25,7 +24,6 @@ import type {
   Subshell,
   TestCommand,
   TestExpression,
-  Time,
   While,
   Word,
 } from "./types.ts";
@@ -122,13 +120,10 @@ function printNode(n: PipelineNode | AndOr, indent: number): string {
       return appendRedirects(printNode(n.command, indent), n.redirects);
     case "Pipeline":
       return pipe(n, indent);
-    case "Time":
-    case "Negation":
-      return pipelinePrefix(n, indent);
     case "AndOr":
       return andOr(n, indent);
     case "If":
-      return ifNode(n, indent, false);
+      return ifNode(n, indent);
     case "For":
       return forNode(n, indent);
     case "While":
@@ -219,26 +214,22 @@ function appendRedirects(command: string, redirects: readonly Redirection[]): st
 
 function pipe(p: Pipeline, indent: number): string {
   let out = "";
+  for (const prefix of p.prefixes) {
+    if (out) out += " ";
+    if (prefix.type === "Negation") {
+      out += "!";
+    } else {
+      out += "time";
+      if (prefix.posix) out += " -p";
+      if (prefix.endOfOptions) out += " --";
+    }
+  }
   for (let i = 0; i < p.commands.length; i++) {
     if (i > 0) out += " " + p.operators[i - 1] + " ";
+    else if (out) out += " ";
     out += printNode(p.commands[i], indent);
   }
   return out;
-}
-
-function pipelinePrefix(prefix: Time | Negation, indent: number): string {
-  let out = "";
-  let node: PipelineNode | undefined = prefix;
-  while (node?.type === "Time" || node?.type === "Negation") {
-    if (node.type === "Time") {
-      out += "time";
-      if (node.posix) out += " -p";
-      if (node.endOfOptions) out += " --";
-    } else out += "!";
-    node = node.command;
-    if (node) out += " ";
-  }
-  return node ? out + printNode(node, indent) : out;
 }
 
 function andOr(a: AndOr, indent: number): string {
@@ -250,24 +241,19 @@ function andOr(a: AndOr, indent: number): string {
   return out;
 }
 
-function ifNode(n: If, indent: number, isElif: boolean): string {
+function ifNode(n: If, indent: number): string {
   const pad = "  ".repeat(indent);
-  const kw = isElif ? "elif" : "if";
-  let out = kw + " " + inlineClause(n.clause, "then") + "\n";
+  let out = "if " + inlineClause(n.clause, "then") + "\n";
   out += stmts(n.then.commands, indent + 1);
-  if (n.else) {
-    out += "\n";
-    if (n.else.type === "If") {
-      out += pad + ifNode(n.else, indent, true);
-    } else {
-      out += pad + "else\n";
-      out += stmts(n.else.commands, indent + 1) + "\n";
-      out += pad + "fi";
-    }
-  } else {
-    out += "\n" + pad + "fi";
+  for (const branch of n.elif) {
+    out += "\n" + pad + "elif " + inlineClause(branch.clause, "then") + "\n";
+    out += stmts(branch.then.commands, indent + 1);
   }
-  return out;
+  if (n.else) {
+    out += "\n" + pad + "else\n";
+    out += stmts(n.else.commands, indent + 1);
+  }
+  return out + "\n" + pad + "fi";
 }
 
 function forNode(n: For, indent: number): string {
@@ -355,10 +341,16 @@ function testExpr(e: TestExpression): string {
       return e.operand.text === "" ? e.operator : e.operator + " " + wd(e.operand);
     case "TestBinary":
       return wd(e.left) + " " + e.operator + " " + wd(e.right);
-    case "TestLogical":
-      return testExpr(e.left) + " " + e.operator + " " + testExpr(e.right);
+    case "TestLogical": {
+      let out = "";
+      for (let i = 0; i < e.operands.length; i++) {
+        if (i > 0) out += " " + e.operator + " ";
+        out += testExpr(e.operands[i]);
+      }
+      return out;
+    }
     case "TestNot":
-      return "! " + testExpr(e.operand);
+      return "! ".repeat(e.negations.length) + testExpr(e.operand);
     case "TestGroup":
       return "( " + testExpr(e.expression) + " )";
   }

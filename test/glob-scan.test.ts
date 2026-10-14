@@ -40,8 +40,8 @@ test("lazy glob candidates survive quotes, escapes and nested scans", () => {
   ] as const) {
     const ast = parse(source);
     const found: string[] = [];
-    JSON.stringify(ast, (_key, value) => {
-      if (value?.type === "Script") assert.equal(value.errors, undefined, source);
+    JSON.stringify(ast, (key, value) => {
+      if (key === "errors") assert.equal(value, undefined, source);
       if (value?.type === "Glob") found.push(value.text);
       return value;
     });

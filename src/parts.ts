@@ -1,8 +1,9 @@
 import type { Word, WordPart } from "./internal-types.ts";
-import { hasEmbeddedWordStructure, Lexer, MAX_SYNTAX_NESTING } from "./lexer.ts";
+import { hasEmbeddedWordStructure, Lexer } from "./lexer.ts";
 import { parseRegion } from "./parser.ts";
 import type { PartsResolver } from "./word.ts";
 import type { SubstitutionContext } from "./substitution-context.ts";
+import { MAX_SYNTAX_NESTING } from "./limits.ts";
 import { hasGlobCharacters, parseGlobParts } from "./glob.ts";
 
 export const computeBareWordParts: PartsResolver = (_source, word) =>

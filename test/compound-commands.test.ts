@@ -66,15 +66,16 @@ test("if/then/fi", () => {
   const if_ = parse("if test cond; then echo yes; fi").commands[0].command as If;
   assert.equal(if_.type, "If");
   assert.ok(if_.then);
+  assert.deepEqual(if_.elif, []);
   assert.equal(if_.else, undefined);
 });
 
 test("if/elif/else/fi", () => {
   const if_ = parse("if a; then b; elif c; then d; else e; fi").commands[0].command as If;
   assert.equal(if_.type, "If");
-  assert.ok(if_.else);
-  assert.equal((if_.else as If).type, "If");
-  assert.ok((if_.else as If).else);
+  assert.equal(if_.elif?.length, 1);
+  assert.equal(if_.elif?.[0].type, "Elif");
+  assert.equal(if_.else?.type, "CompoundList");
 });
 
 test("redirected pipelines do not merge adjacent if statements (#304)", () => {

@@ -35,8 +35,9 @@ test("a comment after a negated subshell does not close the command substitution
   assert.equal(script.errors, undefined);
   assert.deepEqual([script.pos, script.end], [7, 35]);
   assert.equal(script.commands.length, 2);
-  const negation = nodeOfType(script.commands[0].command, "Negation");
-  const subshell = nodeOfType(negation.command, "Subshell");
+  const negation = nodeOfType(script.commands[0].command, "Pipeline");
+  assert.equal(negation.prefixes[0].type, "Negation");
+  const subshell = nodeOfType(negation.commands[0], "Subshell");
   assert.equal(nodeOfType(subshell.body.commands[0].command, "Command").name?.text, "echo");
   const after = nodeOfType(script.commands[1].command, "Command");
   assert.deepEqual(
@@ -65,6 +66,53 @@ test("quoted defaults do not treat escaped or consumed dollars as nested expansi
       assert.equal(verify(source, ast), source);
     }
   }
+});
+
+test("escaped dollars inside quoted substitution text stay literal", () => {
+  // Bash 5.3: `\$` in double quotes is a literal dollar, so `\$(` opens nothing there.
+  for (const [source, operand] of [
+    ['echo ${x:-"\\$(foo"} tail', "$(foo"],
+    ['echo ${x:-"${y}\\$(foo"} tail', "${y}$(foo"],
+    ['echo ${x:-"$\\$(foo"} tail', "$$(foo"],
+  ] as const) {
+    const ast = parse(source);
+    assert.equal(ast.errors, undefined, source);
+    const command = nodeOfType(ast.commands[0].command, "Command");
+    const parameter = nodeOfType(nodeOfType(command.args[0], "Word").parts?.[0], "ParameterExpansion");
+    assert.equal(parameter.operation?.type, "Default", source);
+    if (parameter.operation?.type === "Default") assert.equal(parameter.operation.operand.value, operand, source);
+    assert.equal(nodeOfType(command.args[1], "Word").text, "tail", source);
+    assert.equal(verify(source, ast), source);
+  }
+  for (const source of [
+    'echo {a,"\\$(b"} tail',
+    'echo ${a["\\$(k"]} tail',
+    'echo $(( "\\$(" )) tail',
+    'echo $(echo "\\$(x") tail',
+  ]) {
+    const ast = parse(source);
+    assert.equal(ast.errors, undefined, source);
+    const command = nodeOfType(ast.commands[0].command, "Command");
+    assert.equal(nodeOfType(command.args[1], "Word").text, "tail", source);
+    assert.equal(verify(source, ast), source);
+  }
+  const array = parse('a=("\\$(foo" bar); echo after');
+  assert.equal(array.errors, undefined);
+  const value = nodeOfType(nodeOfType(array.commands[0].command, "Command").prefix[0], "Assignment").value;
+  assert.deepEqual(
+    nodeOfType(value, "ArrayValue").elements.map((element) => element.value),
+    ["$(foo", "bar"],
+  );
+  assert.equal(nodeOfType(array.commands[1].command, "Command").name?.value, "echo");
+  const nested = parse("echo $(echo \\$(x)) tail");
+  assert.equal(nested.errors, undefined);
+  const expansion = nodeOfType(nodeOfType(nested.commands[0].command, "Command").args[0], "Word").parts?.[0];
+  assert.deepEqual(nodeOfType(expansion, "CommandExpansion").script?.errors, [
+    { message: "unexpected token '('", pos: 14 },
+  ]);
+  // `$$(` still reads as `$` followed by `$(`, as Bash's quote scanner does.
+  assert.equal(parse('echo ${x:-"$$(x"} tail').errors?.[0].message, "unterminated parameter expansion");
+  assert.equal(parse('echo ${x:-"$$(x)"} tail').errors, undefined);
 });
 
 test("command and process substitution boundaries use function and assignment grammar", () => {
@@ -127,8 +175,9 @@ test("hashes adjacent to extglob operands remain word data", () => {
 test("ambiguous substitution boundaries retain the shared nesting limit", () => {
   const source = "echo $(".repeat(512) + "!(echo inside)# )\necho after" + ")".repeat(512);
   const ast = parse(source);
-  assert.ok(ast.errors?.some((error) => error.message === "maximum command substitution nesting depth exceeded"));
-  assert.doesNotThrow(() => JSON.stringify(ast));
+  assert.deepEqual(ast.errors?.[0], { message: "maximum command substitution nesting depth exceeded", pos: 1797 });
+  assert.equal(nodeOfType(ast.commands[0].command, "Command").name?.value, "echo");
+  assert.ok(JSON.parse(JSON.stringify(ast)).commands.length);
 });
 
 test("nested ambiguous boundaries do not depend on a warmed-up call stack", () => {
@@ -149,7 +198,8 @@ test("nested ambiguous boundaries do not depend on a warmed-up call stack", () =
        const call = node.type === "Coproc" ? node.body : node;
        const script = call.args[0].parts[0].script;
        assert.equal(script.errors, undefined);
-       assert.equal(script.commands[0].command.type, "Negation");
+       assert.equal(script.commands[0].command.type, "Pipeline");
+       assert.equal(script.commands[0].command.prefixes[0].type, "Negation");
        JSON.stringify(ast);
      }
      const compound = ":; " + "( ".repeat(256) + "echo $(!(echo leaf)# )\\necho tail)" + " )".repeat(256);
@@ -199,11 +249,9 @@ test("sibling substitution boundaries do not repeatedly parse preceding commands
 test("nested script scopes isolate arithmetic, case patterns, and pending heredocs", () => {
   const arithmetic = parse("echo $(echo $((1 + $(!(printf 1)# )\nprintf 2))); echo $(!(echo sibling)# )\necho tail))");
   const commandCounts: number[] = [];
-  JSON.stringify(arithmetic, (_key, value) => {
-    if (value?.type === "Script") {
-      assert.equal(value.errors, undefined);
-      commandCounts.push(value.commands.length);
-    }
+  JSON.stringify(arithmetic, (key, value) => {
+    if (key === "errors") assert.equal(value, undefined);
+    if (value?.type === "Script") commandCounts.push(value.commands.length);
     return value;
   });
   assert.deepEqual(commandCounts, [1, 2, 2, 2]);
@@ -219,8 +267,8 @@ test("nested script scopes isolate arithmetic, case patterns, and pending heredo
     "echo $(echo $((1<(2)))); echo after",
   ]) {
     const ast = parse(source);
-    JSON.stringify(ast, (_key, value) => {
-      if (value?.type === "Script") assert.equal(value.errors, undefined, source);
+    JSON.stringify(ast, (key, value) => {
+      if (key === "errors") assert.equal(value, undefined, source);
       return value;
     });
     assert.equal(verify(source, ast), source);
@@ -245,8 +293,8 @@ test("nested substitution boundaries survive every lazy container", () => {
   ]) {
     const ast = parse(source);
     let substitutions = 0;
-    JSON.stringify(ast, (_key, value) => {
-      if (value?.type === "Script") assert.equal(value.errors, undefined, source);
+    JSON.stringify(ast, (key, value) => {
+      if (key === "errors") assert.equal(value, undefined, source);
       if (value?.type === "CommandExpansion" || value?.type === "ArithmeticCommandExpansion") substitutions++;
       return value;
     });

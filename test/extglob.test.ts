@@ -11,9 +11,13 @@ const wp = (s: string, w: import("../src/types.ts").Word) => computeWordParts(s,
 test("command-start bang preserves default Bash's negated subshell", () => {
   const ast = parse("!(echo RAN-INSIDE)");
   assert.equal(ast.errors, undefined);
-  const negation = nodeOfType(ast.commands[0].command, "Negation");
-  assert.deepEqual([negation.pos, negation.keywordEnd, negation.end], [0, 1, 18]);
-  const subshell = nodeOfType(negation.command, "Subshell");
+  const pipeline = nodeOfType(ast.commands[0].command, "Pipeline");
+  assert.deepEqual([pipeline.pos, pipeline.end], [0, 18]);
+  assert.deepEqual(
+    pipeline.prefixes.map((prefix) => [prefix.type, prefix.pos, prefix.end]),
+    [["Negation", 0, 1]],
+  );
+  const subshell = nodeOfType(pipeline.commands[0], "Subshell");
   assert.deepEqual([subshell.pos, subshell.end], [1, 18]);
   const command = nodeOfType(subshell.body.commands[0].command, "Command");
   assert.equal(command.name?.text, "echo");

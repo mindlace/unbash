@@ -96,50 +96,65 @@ test("parameter expansion nesting at the parser limit remains lossless", () => {
   assert.equal(part.operation.operand.text, "x");
 });
 
-test("excessive parameter expansion nesting degrades without stack overflow", () => {
+test("excessive parameter expansion nesting preserves words and following commands", () => {
   for (const src of [nestedParamIndexes(2_000), nestedParamDefaults(2_000)]) {
-    const ast = parse(src);
-    JSON.stringify(ast);
+    const ast = parse(`${src}; after`);
+    const restored: ParsedScript = JSON.parse(JSON.stringify(ast));
     assert.ok(
       ast.errors?.some((e) => e.message === "maximum parameter expansion nesting depth exceeded"),
       src.slice(0, 8),
     );
+    assert.equal(nodeOfType(restored.commands[0].command, "Command").name?.text, src);
+    assert.equal(nodeOfType(restored.commands[1].command, "Command").name?.value, "after");
+    assert.equal(restored.commands.length, 2);
   }
 });
 
-test("excessive arithmetic expansion nesting degrades without stack overflow", () => {
-  const ast = parse(nestedArithIndexes(2_000));
-  JSON.stringify(ast);
+test("excessive arithmetic expansion nesting preserves words and following commands", () => {
+  const src = nestedArithIndexes(2_000);
+  const ast = parse(`${src}; after`);
+  const restored: ParsedScript = JSON.parse(JSON.stringify(ast));
   assert.ok(ast.errors?.some((e) => e.message === "maximum arithmetic expansion nesting depth exceeded"));
+  assert.equal(nodeOfType(restored.commands[0].command, "Command").name?.text, src);
+  assert.equal(nodeOfType(restored.commands[1].command, "Command").name?.value, "after");
+  assert.equal(restored.commands.length, 2);
 });
 
-test("excessive assignment subscript substitution nesting degrades without stack overflow", () => {
-  const ast = parse(nestedAssignSubscripts(2_000));
-  JSON.stringify(ast);
+test("excessive assignment subscript substitution nesting preserves following commands", () => {
+  const ast = parse(`${nestedAssignSubscripts(2_000)}; after`);
+  const restored: ParsedScript = JSON.parse(JSON.stringify(ast));
   assert.ok(ast.errors?.some((e) => e.message === "maximum command substitution nesting depth exceeded"));
+  assert.equal(nodeOfType(restored.commands[1].command, "Command").name?.value, "after");
+  assert.equal(restored.commands.length, 2);
 });
 
-test("nested substitution scripts stop at a flagged boundary script", () => {
-  const ast = parse(nestedAssignSubscripts(2_000));
-  JSON.stringify(ast);
-  let script: ParsedScript = ast;
+test("nested substitution scripts below the limit retain their structure", () => {
+  const ast = parse(nestedAssignSubscripts(200));
+  assert.deepEqual(allErrors(ast), []);
+  assert.equal(countOfType(ast, "CommandExpansion"), 200);
+});
+
+test("nested substitution scripts stop at a diagnosed boundary script", () => {
+  let script = parse(nestedAssignSubscripts(2_000));
   let depth = 0;
-  let boundary: ParsedScript | undefined;
   for (;;) {
-    const command = script.commands[0]?.command;
-    const assignment = nodeOfType(command?.type === "Command" ? command.prefix[0] : undefined, "Assignment");
-    const sub = assignment.index?.parts?.find((p) => p.type === "CommandExpansion");
-    if (!sub) break;
+    const command = nodeOfType(script.commands[0].command, "Command");
+    const assignment = nodeOfType(command.prefix[0], "Assignment");
+    const substitution = nodeOfType(assignment.index?.parts?.[0], "CommandExpansion");
     depth++;
-    if (sub.script === undefined) {
-      boundary = script;
+    if (substitution.script === undefined) {
+      assert.equal(depth, 258);
+      assert.equal(script.pos, 1028);
+      assert.ok(
+        script.errors?.some(
+          (error) => error.message === "maximum substitution nesting depth exceeded" && error.pos === 1028,
+        ),
+      );
+      assert.equal(substitution.script, undefined);
       break;
     }
-    script = sub.script;
+    script = substitution.script;
   }
-  assert.ok(boundary, `expected an unresolved substitution boundary (walked ${depth} scripts)`);
-  assert.ok(depth > 250 && depth < 300, `boundary at depth ${depth}`);
-  assert.ok(boundary.errors?.some((e) => e.message === "maximum substitution nesting depth exceeded"));
 });
 
 // Materializes every lazy field and nested script through JSON, then collects every error.
@@ -307,6 +322,19 @@ test("excessive brace nesting recovers past inert braces and preserves following
   assert.equal(nodeOfType(ast.commands[1].command.suffix[0], "Assignment", "Word").value, "after");
 });
 
+test("excessive if nesting recovers past inert fi words and preserves following commands", () => {
+  const src = `${nestedIfClauses(2_000, "echo fi")}; echo after`;
+  const ast = parse(src);
+
+  assert.deepEqual(
+    ast.errors?.map((error) => error.message),
+    ["maximum if nesting depth exceeded"],
+  );
+  assert.equal(ast.commands.length, 2);
+  assert.equal(ast.commands[1].command.type, "Command");
+  assert.equal(nodeOfType(ast.commands[1].command.suffix[0], "Assignment", "Word").value, "after");
+});
+
 test("compound recovery handles C-style for loops with brace bodies", () => {
   const body = 'for ((i = 0; i < 1; i++)); { echo "}"; }';
   const ast = parse(`${nestedBraceGroups(2_000, body)}; echo after`);
@@ -410,30 +438,12 @@ test("compound recovery tracks newline separators after bare assignments", () =>
   assert.equal(nodeOfType(ast.commands[1].command.suffix[0], "Assignment", "Word").value, "after");
 });
 
-test("excessive if nesting recovers past inert fi words and preserves following commands", () => {
-  const src = `${nestedIfClauses(2_000, "echo fi")}; echo after`;
-  const ast = parse(src);
-
-  assert.deepEqual(
-    ast.errors?.map((error) => error.message),
-    ["maximum if nesting depth exceeded"],
-  );
-  assert.equal(ast.commands.length, 2);
-  assert.equal(ast.commands[1].command.type, "Command");
-  assert.equal(nodeOfType(ast.commands[1].command.suffix[0], "Assignment", "Word").value, "after");
-});
-
 test("deep elif chains remain lossless and preserve following commands", () => {
   const ast = parse(`${nestedElifClauses(2_000, "echo fi")}; echo after`);
 
   assert.equal(ast.errors, undefined);
-  let branch = ast.commands[0].command as If;
-  let branchCount = 1;
-  while (branch.else?.type === "If") {
-    branch = branch.else;
-    branchCount++;
-  }
-  assert.equal(branchCount, 2_000);
+  const branch = ast.commands[0].command as If;
+  assert.equal(1 + (branch.elif?.length ?? 0), 2_000);
   assert.equal(ast.commands.length, 2);
   assert.equal(ast.commands[1].command.type, "Command");
   assert.equal(nodeOfType(ast.commands[1].command.suffix[0], "Assignment", "Word").value, "after");
@@ -464,13 +474,9 @@ test("deep test negation remains lossless and preserves following commands", () 
 
   assert.equal(ast.errors, undefined);
   assert.equal(ast.commands[0].command.type, "TestCommand");
-  let expression = ast.commands[0].command.expression;
-  let depth = 0;
-  while (expression.type === "TestNot") {
-    depth++;
-    expression = expression.operand;
-  }
-  assert.equal(depth, 4_000);
+  const expression = nodeOfType(ast.commands[0].command.expression, "TestNot");
+  assert.equal(expression.negations.length, 4_000);
+  assert.equal(expression.operand.type, "TestUnary");
   assert.equal(ast.commands.length, 2);
   assert.equal(ast.commands[1].command.type, "Command");
   assert.equal(nodeOfType(ast.commands[1].command.suffix[0], "Assignment", "Word").value, "after");

@@ -256,10 +256,11 @@ test("nested declarations serialize each substitution once", () => {
   assert.equal(print(restored), source);
 });
 
-test("nested declaration arrays preserve the substitution depth budget", () => {
+test("nested declaration arrays share the substitution nesting limit", () => {
   const source = "declare a=($(".repeat(300) + "printf hi" + "))".repeat(300);
-  const ast = parse(source);
-  const serialized = JSON.stringify(ast);
-  assert.ok(ast.errors?.some((error) => error.message === "maximum command substitution nesting depth exceeded"));
-  assert.equal(serialized.split('"type":"CommandExpansion"').length - 1, 258);
+  const ast = parse(source + "; after");
+  assert.deepEqual(ast.errors, [{ message: "maximum command substitution nesting depth exceeded", pos: 3339 }]);
+  assert.equal(nodeOfType(ast.commands[1].command, "Command").name?.value, "after");
+  const restored: ParsedScript = JSON.parse(JSON.stringify(ast));
+  assert.equal(nodeOfType(restored.commands[1].command, "Command").name?.value, "after");
 });

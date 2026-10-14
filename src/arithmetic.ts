@@ -1,4 +1,5 @@
 import type { ArithmeticCommandExpansion, ArithmeticExpression, ArithmeticWord } from "./internal-types.ts";
+import { MAX_SYNTAX_NESTING } from "./limits.ts";
 import {
   CH_TAB,
   CH_NL,
@@ -81,9 +82,20 @@ function opPrec(op: string): number {
       return 13;
     case "**":
       return 14;
+    case "?":
+      return 3;
     default:
       return -1;
   }
+}
+
+function trimEnd(src: string, start: number, end: number): number {
+  while (end > start) {
+    const c = src.charCodeAt(end - 1);
+    if (c !== CH_SPACE && c !== CH_TAB && c !== CH_NL) break;
+    end--;
+  }
+  return end;
 }
 
 function opRightAssoc(op: string): boolean {
@@ -122,6 +134,7 @@ export function parseArithmeticExpression(
   src: string,
   offset: number = 0,
   collector?: ArithmeticParseCollector,
+  nestingDepth = 0,
 ): ArithmeticExpression | null {
   let pos = 0;
   const len = src.length;
@@ -279,8 +292,69 @@ export function parseArithmeticExpression(
     }
   }
 
-  function parseBinExpr(minPrec: number): ArithmeticExpression {
-    let left = parseUnaryExpr();
+  function skipTruncatedUnary(): void {
+    skipWS();
+    while (pos < len) {
+      const c = src.charCodeAt(pos);
+      if (c !== CH_BANG && c !== CH_TILDE && c !== CH_PLUS && c !== CH_DASH) break;
+      if (src.charCodeAt(pos + 1) === CH_EQ) break;
+      pos++;
+      skipWS();
+    }
+    if (src.charCodeAt(pos) === CH_LPAREN) {
+      let groups = 1;
+      pos++;
+      while (pos < len && groups > 0) {
+        const wordEnd = collector?.findArithmeticWordEnd?.(pos + offset, offset + len) ?? pos + offset;
+        if (wordEnd > pos + offset) {
+          pos = wordEnd - offset;
+          continue;
+        }
+        const c = src.charCodeAt(pos++);
+        if (c === CH_LPAREN) groups++;
+        else if (c === CH_RPAREN) groups--;
+      }
+    } else if (pos < len && src.charCodeAt(pos) !== CH_RPAREN && src.charCodeAt(pos) !== CH_COLON) {
+      parseAtom(0);
+    }
+    skipWS();
+    const c = src.charCodeAt(pos);
+    if ((c === CH_PLUS || c === CH_DASH) && src.charCodeAt(pos + 1) === c) pos += 2;
+  }
+
+  function recoverExpression(minPrec: number): ArithmeticWord {
+    skipWS();
+    const start = pos;
+    if (start === len) return makeWord(start, start);
+    const commandCount = collector?.commandExpansions.length ?? 0;
+    const wordCount = collector?.embeddedWords.length ?? 0;
+    let ternaries = 0;
+    for (;;) {
+      skipTruncatedUnary();
+      skipWS();
+      if (src.charCodeAt(pos) === CH_COLON && ternaries > 0) {
+        ternaries--;
+        pos++;
+        continue;
+      }
+      const saved = pos;
+      const op = tryReadBinOp();
+      if (op === null || (ternaries === 0 && opPrec(op) < minPrec)) {
+        pos = saved;
+        break;
+      }
+      if (op === "?") ternaries++;
+    }
+    if (collector) {
+      collector.commandExpansions.length = commandCount;
+      collector.embeddedWords.length = wordCount;
+    }
+    return makeWord(start, trimEnd(src, start, pos));
+  }
+
+  function parseBinExpr(minPrec: number, depth: number): ArithmeticExpression {
+    if (depth > MAX_SYNTAX_NESTING) return recoverExpression(minPrec);
+    let left = parseUnaryExpr(depth);
 
     while (true) {
       skipWS();
@@ -292,14 +366,14 @@ export function parseArithmeticExpression(
 
       // Ternary
       if (op === "?") {
-        if (3 < minPrec) {
+        if (opPrec(op) < minPrec) {
           pos = saved;
           break;
         }
-        const consequent = parseBinExpr(1);
+        const consequent = parseBinExpr(1, depth + 1);
         skipWS();
         if (pos < len && src.charCodeAt(pos) === CH_COLON) pos++;
-        const alternate = parseBinExpr(3);
+        const alternate = parseBinExpr(3, depth + 1);
         left = { type: "ArithmeticTernary", pos: left.pos, end: alternate.end, test: left, consequent, alternate };
         continue;
       }
@@ -311,15 +385,16 @@ export function parseArithmeticExpression(
       }
 
       const nextPrec = opRightAssoc(op) ? prec : prec + 1;
-      const right = parseBinExpr(nextPrec);
+      const right = parseBinExpr(nextPrec, depth + 1);
       left = { type: "ArithmeticBinary", pos: left.pos, end: right.end, operator: op, left, right };
     }
 
     return left;
   }
 
-  function parseUnaryExpr(): ArithmeticExpression {
+  function parseUnaryExpr(depth: number): ArithmeticExpression {
     skipWS();
+    if (depth > MAX_SYNTAX_NESTING) return recoverExpression(15);
     if (pos >= len) return makeWord(pos, pos);
 
     const start = pos;
@@ -329,42 +404,42 @@ export function parseArithmeticExpression(
     // Prefix ++ --
     if (c === CH_PLUS && nc === CH_PLUS) {
       pos += 2;
-      const operand = parseUnaryExpr();
+      const operand = parseUnaryExpr(depth + 1);
       return { type: "ArithmeticUnary", pos: start + offset, end: operand.end, operator: "++", operand, prefix: true };
     }
     if (c === CH_DASH && nc === CH_DASH) {
       pos += 2;
-      const operand = parseUnaryExpr();
+      const operand = parseUnaryExpr(depth + 1);
       return { type: "ArithmeticUnary", pos: start + offset, end: operand.end, operator: "--", operand, prefix: true };
     }
 
     // Unary ! ~ + -
     if (c === CH_BANG) {
       pos++;
-      const operand = parseUnaryExpr();
+      const operand = parseUnaryExpr(depth + 1);
       return { type: "ArithmeticUnary", pos: start + offset, end: operand.end, operator: "!", operand, prefix: true };
     }
     if (c === CH_TILDE) {
       pos++;
-      const operand = parseUnaryExpr();
+      const operand = parseUnaryExpr(depth + 1);
       return { type: "ArithmeticUnary", pos: start + offset, end: operand.end, operator: "~", operand, prefix: true };
     }
     if (c === CH_PLUS && nc !== CH_PLUS && nc !== CH_EQ) {
       pos++;
-      const operand = parseUnaryExpr();
+      const operand = parseUnaryExpr(depth + 1);
       return { type: "ArithmeticUnary", pos: start + offset, end: operand.end, operator: "+", operand, prefix: true };
     }
     if (c === CH_DASH && nc !== CH_DASH && nc !== CH_EQ) {
       pos++;
-      const operand = parseUnaryExpr();
+      const operand = parseUnaryExpr(depth + 1);
       return { type: "ArithmeticUnary", pos: start + offset, end: operand.end, operator: "-", operand, prefix: true };
     }
 
-    return parsePostfixExpr();
+    return parsePostfixExpr(depth);
   }
 
-  function parsePostfixExpr(): ArithmeticExpression {
-    const operand = parseAtom();
+  function parsePostfixExpr(depth: number): ArithmeticExpression {
+    const operand = parseAtom(depth);
     skipWS();
     if (pos + 1 < len) {
       const c = src.charCodeAt(pos);
@@ -381,7 +456,7 @@ export function parseArithmeticExpression(
     return operand;
   }
 
-  function parseAtom(): ArithmeticExpression {
+  function parseAtom(depth: number): ArithmeticExpression {
     skipWS();
     if (pos >= len) return makeWord(pos, pos);
 
@@ -391,7 +466,7 @@ export function parseArithmeticExpression(
     if (c === CH_LPAREN) {
       const start = pos;
       pos++;
-      const expr = parseBinExpr(0);
+      const expr = parseBinExpr(0, depth + 1);
       skipWS();
       if (pos < len && src.charCodeAt(pos) === CH_RPAREN) pos++;
       return { type: "ArithmeticGroup", pos: start + offset, end: pos + offset, expression: expr };
@@ -565,7 +640,7 @@ export function parseArithmeticExpression(
   skipWS();
   if (pos >= len) return null;
   const start = pos;
-  const result = parseBinExpr(0);
+  const result = parseBinExpr(0, nestingDepth);
   skipWS();
   if (pos < len) {
     // Unparsed tokens remain: a partial tree would silently drop them, so keep the whole body
@@ -574,13 +649,7 @@ export function parseArithmeticExpression(
       collector.commandExpansions.length = initialCommandCount;
       collector.embeddedWords.length = initialWordCount;
     }
-    let end = len;
-    while (end > start) {
-      const c = src.charCodeAt(end - 1);
-      if (c !== CH_SPACE && c !== CH_TAB && c !== CH_NL) break;
-      end--;
-    }
-    return makeWord(start, end, collector !== undefined);
+    return makeWord(start, trimEnd(src, start, len), collector !== undefined);
   }
   return result;
 }

@@ -1,4 +1,5 @@
-import { Lexer, LexContext, skipLineContinuations, Token } from "./lexer.ts";
+import { Lexer, LexContext, Token } from "./lexer.ts";
+import { skipLineContinuations } from "./chars.ts";
 import { arrayPartsResolver, computeBareWordParts, embeddedPartsResolver, wordPartsResolver } from "./parts.ts";
 import type { ArrayValue, Assignment, Word } from "./internal-types.ts";
 import { WordImpl } from "./word.ts";

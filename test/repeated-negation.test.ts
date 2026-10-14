@@ -9,13 +9,15 @@ test("repeated negation applies to the entire pipeline", () => {
   const andOr = ast.commands[0].command;
   assert.ok(andOr.type === "AndOr");
   assert.deepEqual(andOr.operators, ["&&"]);
-  const negation = andOr.commands[0];
-  assert.ok(negation.type === "Negation");
-  assert.ok(negation.command?.type === "Negation");
-  const pipeline = negation.command.command;
-  assert.ok(pipeline);
-  assert.ok(pipeline.type === "Pipeline");
-  assert.deepEqual([negation.pos, negation.end, pipeline.pos, pipeline.end], [0, 16, 4, 16]);
+  const pipeline = nodeOfType(andOr.commands[0], "Pipeline");
+  assert.deepEqual(
+    pipeline.prefixes.map((prefix) => [prefix.type, prefix.pos, prefix.end]),
+    [
+      ["Negation", 0, 1],
+      ["Negation", 2, 3],
+    ],
+  );
+  assert.deepEqual([pipeline.pos, pipeline.end], [0, 16]);
   assert.deepEqual(pipeline.operators, ["|"]);
   assert.deepEqual(
     pipeline.commands.map((command) => command.type === "Command" && command.name?.text),
@@ -28,12 +30,9 @@ test("repeated negation applies to the entire pipeline", () => {
 test("quoted and escaped bangs remain command words after negation", () => {
   for (const name of ["'!'", '"!"', "\\!"]) {
     const ast = parse(`! ! ${name} arg !`);
-    const negation = ast.commands[0].command;
-    assert.ok(negation.type === "Negation");
-    assert.ok(negation.command?.type === "Negation");
-    const command = negation.command.command;
-    assert.ok(command);
-    assert.ok(command.type === "Command");
+    const pipeline = nodeOfType(ast.commands[0].command, "Pipeline");
+    assert.equal(pipeline.prefixes.length, 2);
+    const command = nodeOfType(pipeline.commands[0], "Command");
     assert.equal(command.name?.text, name);
     assert.equal(command.name.value, "!");
     assert.deepEqual(
@@ -44,26 +43,25 @@ test("quoted and escaped bangs remain command words after negation", () => {
   }
 });
 
-test("bare negation runs preserve null commands and source ranges", () => {
-  const cases: [string, number, number, number, string][] = [
-    ["!", 1, 0, 1, "!"],
-    ["  ! !  ", 2, 2, 5, "! !"],
-    ["! ! !", 3, 0, 5, "! ! !"],
-    ["! ! ! !", 4, 0, 7, "! ! ! !"],
-    ["time ! !", 2, 0, 8, "time ! !"],
+test("bare negation runs preserve empty commands and source ranges", () => {
+  const N = "Negation";
+  const cases: [string, string[], number, number, string][] = [
+    ["!", [N], 0, 1, "!"],
+    ["  ! !  ", [N, N], 2, 5, "! !"],
+    ["! ! !", [N, N, N], 0, 5, "! ! !"],
+    ["! ! ! !", [N, N, N, N], 0, 7, "! ! ! !"],
+    ["time ! !", ["Time", N, N], 0, 8, "time ! !"],
   ];
-  for (const [source, count, pos, end, printed] of cases) {
+  for (const [source, prefixes, pos, end, printed] of cases) {
     const ast = parse(source);
-    const prefix = ast.commands[0].command;
-    assert.deepEqual([prefix.pos, prefix.end], [pos, end], source);
-    let node = prefix.type === "Time" ? prefix.command : prefix;
-    let actual = 0;
-    while (node?.type === "Negation") {
-      actual++;
-      node = node.command;
-    }
-    assert.equal(actual, count, source);
-    assert.equal(node, undefined, source);
+    const pipeline = nodeOfType(ast.commands[0].command, "Pipeline");
+    assert.deepEqual([pipeline.pos, pipeline.end], [pos, end], source);
+    assert.deepEqual(
+      pipeline.prefixes.map((prefix) => prefix.type),
+      prefixes,
+      source,
+    );
+    assert.deepEqual(pipeline.commands, [], source);
     assert.equal(ast.errors, undefined, source);
     assert.equal(print(ast), printed, source);
   }
@@ -89,14 +87,11 @@ test("bare even negation survives statement and conditional printing", () => {
 test("repeated negation retains compound redirects and background execution", () => {
   const ast = parse("! ! { echo yes; } > out &");
   const statement = ast.commands[0];
-  const negation = statement.command;
+  const pipeline = nodeOfType(statement.command, "Pipeline");
   assert.equal(statement.background, true);
-  assert.ok(negation.type === "Negation");
-  assert.ok(negation.command?.type === "Negation");
-  assert.deepEqual([negation.pos, negation.end], [0, 23]);
-  const command = negation.command.command;
-  assert.ok(command);
-  assert.ok(command.type === "Redirected");
+  assert.equal(pipeline.prefixes.length, 2);
+  assert.deepEqual([pipeline.pos, pipeline.end], [0, 23]);
+  const command = nodeOfType(pipeline.commands[0], "Redirected");
   assert.equal(command.command.type, "BraceGroup");
   assert.deepEqual(
     redirectsOf(command).map((redirect) => [
@@ -110,18 +105,21 @@ test("repeated negation retains compound redirects and background execution", ()
 });
 
 test("repeated negation preserves errors and ranges for unfinished pipelines", () => {
-  const cases: [string, string, number, number][] = [
-    ["! ! | echo after", "unexpected token '|'", 4, 3],
-    ["! ! cmd |", "expected command after '|'", 9, 7],
-    ["! ! cmd |&", "expected command after '|&'", 10, 7],
+  const cases: [string, string, number, number, string[]][] = [
+    ["! ! | echo after", "unexpected token '|'", 4, 3, []],
+    ["! ! cmd |", "expected command after '|'", 9, 7, ["Command"]],
+    ["! ! cmd |&", "expected command after '|&'", 10, 7, ["Command"]],
   ];
-  for (const [source, message, pos, end] of cases) {
+  for (const [source, message, pos, end, commands] of cases) {
     const ast = parse(source);
-    const negation = ast.commands[0].command;
-    assert.ok(negation.type === "Negation");
-    assert.ok(negation.command?.type === "Negation");
-    assert.deepEqual([negation.pos, negation.end], [0, end], source);
-    assert.equal(negation.command.command?.type, source.includes("cmd") ? "Command" : undefined, source);
+    const pipeline = nodeOfType(ast.commands[0].command, "Pipeline");
+    assert.equal(pipeline.prefixes.length, 2, source);
+    assert.deepEqual([pipeline.pos, pipeline.end], [0, end], source);
+    assert.deepEqual(
+      pipeline.commands.map((command) => command.type),
+      commands,
+      source,
+    );
     assert.deepEqual(ast.errors, [{ message, pos }], source);
   }
 });

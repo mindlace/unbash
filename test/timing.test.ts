@@ -1,9 +1,8 @@
-import { nodeOfType } from "./ast-helpers.ts";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { parse } from "../src/parser.ts";
 import { print } from "../src/printer.ts";
-import type { SyntaxNode } from "../src/types.ts";
+import { nodeOfType } from "./ast-helpers.ts";
 
 test("timing and negation retain prefix order around the complete pipeline", () => {
   for (const [source, prefixes] of [
@@ -13,14 +12,12 @@ test("timing and negation retain prefix order around the complete pipeline", () 
     ["time time first | second", ["Time", "Time"]],
   ] as const) {
     const ast = parse(source);
-    let node: SyntaxNode | undefined = ast.commands[0].command;
-    const actual = [];
-    while (node?.type === "Time" || node?.type === "Negation") {
-      actual.push(node.type);
-      node = node.command;
-    }
-    assert.deepEqual(actual, prefixes, source);
-    assert.ok(node?.type === "Pipeline", source);
+    const node = nodeOfType(ast.commands[0].command, "Pipeline");
+    assert.deepEqual(
+      node.prefixes.map((prefix) => prefix.type),
+      prefixes,
+      source,
+    );
     assert.deepEqual(
       node.commands.map((command) => command.type),
       ["Command", "Command"],
@@ -38,18 +35,22 @@ test("timing and negation retain prefix order around the complete pipeline", () 
 test("bare prefix JSON has one child owner and complete keyword and flag ranges", () => {
   const ast = parse("! time -p --");
   assert.deepEqual(JSON.parse(JSON.stringify(ast.commands[0].command)), {
-    type: "Negation",
+    type: "Pipeline",
     pos: 0,
     end: 12,
-    keywordEnd: 1,
-    command: {
-      type: "Time",
-      pos: 2,
-      end: 12,
-      keywordEnd: 6,
-      posix: { pos: 7, end: 9 },
-      endOfOptions: { pos: 10, end: 12 },
-    },
+    prefixes: [
+      { type: "Negation", pos: 0, end: 1 },
+      {
+        type: "Time",
+        pos: 2,
+        end: 12,
+        keywordEnd: 6,
+        posix: { pos: 7, end: 9 },
+        endOfOptions: { pos: 10, end: 12 },
+      },
+    ],
+    commands: [],
+    operators: [],
   });
 });
 
@@ -62,13 +63,14 @@ test("timing preserves option presence and source ranges", () => {
     ["ti\\\nme -\\\np --", 6, { pos: 7, end: 11 }, { pos: 12, end: 14 }, "time -p --"],
   ] as const) {
     const ast = parse(source);
-    const time = ast.commands[0].command;
-    assert.ok(time.type === "Time", source);
+    const pipeline = nodeOfType(ast.commands[0].command, "Pipeline");
+    const time = nodeOfType(pipeline.prefixes[0], "Time");
     assert.equal(time.keywordEnd, keywordEnd, source);
     assert.deepEqual(time.posix, posix, source);
     assert.deepEqual(time.endOfOptions, endOfOptions, source);
-    assert.equal(time.command, undefined, source);
+    assert.deepEqual(pipeline.commands, [], source);
     assert.equal(time.end, source.trimEnd().length, source);
+    assert.equal(pipeline.end, source.trimEnd().length, source);
     assert.equal(ast.errors, undefined, source);
     assert.equal(print(ast), printed, source);
   }
@@ -83,10 +85,9 @@ test("timing consumes each eligible option only once", () => {
     ["time -p '--' arg", "--"],
   ]) {
     const ast = parse(source);
-    const time = ast.commands[0].command;
-    assert.ok(time.type === "Time", source);
-    assert.ok(time.command?.type === "Command", source);
-    assert.equal(time.command.name?.value, name, source);
+    const pipeline = nodeOfType(ast.commands[0].command, "Pipeline");
+    assert.equal(pipeline.prefixes.length, 1, source);
+    assert.equal(nodeOfType(pipeline.commands[0], "Command").name?.value, name, source);
     assert.equal(ast.errors, undefined, source);
     assert.equal(print(ast), source, source);
   }
@@ -103,36 +104,36 @@ test("timing remains an ordinary word after a pipe or command prefix", () => {
   }
 });
 
-test("long prefix sequences use the nesting limit without overflowing JSON or printing", () => {
-  const ast = parse("! time ".repeat(10000) + ":");
-  assert.deepEqual(ast.errors, [{ message: "maximum pipeline prefix nesting depth exceeded", pos: 896 }]);
-  assert.doesNotThrow(() => JSON.stringify(ast));
-  assert.doesNotThrow(() => print(ast));
+test("long prefix sequences stay flat", () => {
+  const source = "! time ".repeat(10000) + ":";
+  const ast = parse(source);
+  const pipeline = nodeOfType(ast.commands[0].command, "Pipeline");
+  assert.equal(ast.errors, undefined);
+  assert.equal(pipeline.prefixes.length, 20000);
+  assert.equal(nodeOfType(pipeline.commands[0], "Command").name?.text, ":");
+  assert.equal(print(ast), source);
 });
 
-test("prefix nesting shares the compound command budget and recovers the following statement", () => {
+test("prefixes do not consume compound command nesting levels", () => {
   const ast = parse("! ".repeat(256) + "{ echo body; }; echo after");
-  assert.deepEqual(ast.errors, [{ message: "maximum brace group nesting depth exceeded", pos: 512 }]);
-  assert.equal(ast.commands.length, 2);
-  const command = ast.commands[1].command;
-  assert.ok(command.type === "Command");
-  assert.equal(command.name?.text, "echo");
-  assert.deepEqual(
-    command.suffix.map((word) => nodeOfType(word, "Assignment", "Word").text),
-    ["after"],
-  );
-  assert.doesNotThrow(() => JSON.stringify(ast));
-  assert.doesNotThrow(() => print(ast));
+  const pipeline = nodeOfType(ast.commands[0].command, "Pipeline");
+  assert.equal(ast.errors, undefined);
+  assert.equal(pipeline.prefixes.length, 256);
+  assert.equal(pipeline.commands[0].type, "BraceGroup");
+  assert.equal(nodeOfType(ast.commands[1].command, "Command").name?.text, "echo");
 });
 
 test("continued negation retains its complete keyword range", () => {
   const ast = parse("!\\\n !\\\n false");
-  const first = ast.commands[0].command;
-  assert.ok(first.type === "Negation");
-  assert.deepEqual([first.pos, first.keywordEnd, first.end], [0, 3, 13]);
-  const second = first.command;
-  assert.ok(second?.type === "Negation");
-  assert.deepEqual([second.pos, second.keywordEnd, second.end], [4, 7, 13]);
+  const pipeline = nodeOfType(ast.commands[0].command, "Pipeline");
+  assert.deepEqual([pipeline.pos, pipeline.end], [0, 13]);
+  assert.deepEqual(
+    pipeline.prefixes.map((prefix) => [prefix.type, prefix.pos, prefix.end]),
+    [
+      ["Negation", 0, 3],
+      ["Negation", 4, 7],
+    ],
+  );
   assert.equal(print(ast), "! ! false");
   assert.equal(ast.errors, undefined);
 });

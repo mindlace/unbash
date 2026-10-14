@@ -2,7 +2,7 @@ import { nodeOfType } from "./ast-helpers.ts";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { parse } from "../src/parser.ts";
-import type { Command, AndOr, Negation, SyntaxNode, Pipeline, Time } from "../src/types.ts";
+import type { Command, AndOr, Pipeline, SyntaxNode } from "../src/types.ts";
 
 const names = (nodes: readonly SyntaxNode[]) => nodes.map((n) => nodeOfType(n, "Command").name?.text);
 const args = (c: Command) => c.suffix.map((s) => nodeOfType(s, "Assignment", "Word").text);
@@ -42,36 +42,40 @@ test("pipeline in logical expression", () => {
 });
 
 test("negated pipeline", () => {
-  const p = parse("! cmd1 | cmd2").commands[0].command as Negation;
-  assert.equal(p.type, "Negation");
-  assert.equal(p.command?.type, "Pipeline");
+  const p = nodeOfType(parse("! cmd1 | cmd2").commands[0].command, "Pipeline");
+  assert.deepEqual(
+    p.prefixes.map((prefix) => prefix.type),
+    ["Negation"],
+  );
+  assert.equal(p.commands.length, 2);
 });
 
 test("repeated pipeline negation preserves every prefix and range", () => {
-  const cases: [string, number, number, number, boolean][] = [
-    ["  ! ! cmd  ", 2, 2, 9, false],
-    ["! ! ! cmd", 3, 0, 9, false],
-    ["! ! ! ! cmd", 4, 0, 11, false],
-    ["time ! ! cmd", 2, 0, 12, true],
-    ["time -p ! ! ! cmd", 3, 0, 17, true],
+  const N = "Negation";
+  const cases: [string, string[], number, number][] = [
+    ["  ! ! cmd  ", [N, N], 2, 9],
+    ["! ! ! cmd", [N, N, N], 0, 9],
+    ["! ! ! ! cmd", [N, N, N, N], 0, 11],
+    ["time ! ! cmd", ["Time", N, N], 0, 12],
+    ["time -p ! ! ! cmd", ["Time", N, N, N], 0, 17],
   ];
-  for (const [source, count, pos, end, time] of cases) {
+  for (const [source, prefixes, pos, end] of cases) {
     const ast = parse(source);
-    let node: SyntaxNode | undefined = ast.commands[0].command;
-    assert.equal(node.pos, pos, source);
-    assert.equal(node.end, end, source);
-    assert.equal(node.type === "Time", time, source);
-    if (node.type === "Time") node = node.command;
-    let actual = 0;
-    while (node?.type === "Negation") {
-      actual++;
-      assert.equal(node.keywordEnd, node.pos + 1, source);
-      assert.equal(node.end, end, source);
-      node = node.command;
+    const pipeline = nodeOfType(ast.commands[0].command, "Pipeline");
+    assert.deepEqual([pipeline.pos, pipeline.end], [pos, end], source);
+    assert.deepEqual(
+      pipeline.prefixes.map((prefix) => prefix.type),
+      prefixes,
+      source,
+    );
+    for (const prefix of pipeline.prefixes) {
+      if (prefix.type === "Negation") assert.equal(prefix.end, prefix.pos + 1, source);
     }
-    assert.equal(actual, count, source);
-    assert.ok(node?.type === "Command", source);
-    assert.equal(node.name?.text, "cmd", source);
+    assert.deepEqual(
+      pipeline.commands.map((command) => nodeOfType(command, "Command").name?.text),
+      ["cmd"],
+      source,
+    );
     assert.equal(ast.errors, undefined, source);
   }
 });
@@ -130,45 +134,47 @@ test("background in logical expression", () => {
 // ── Time prefix ──────────────────────────────────────────────────────
 
 test("time simple command", () => {
-  const p = parse("time sleep 1").commands[0].command as Time;
-  assert.equal(p.type, "Time");
-  assert.equal((p.command as Command).name?.text, "sleep");
+  const p = nodeOfType(parse("time sleep 1").commands[0].command, "Pipeline");
+  assert.equal(p.prefixes[0].type, "Time");
+  assert.equal(nodeOfType(p.commands[0], "Command").name?.text, "sleep");
 });
 
 test("time pipeline", () => {
-  const p = parse("time cmd1 | cmd2").commands[0].command as Time;
-  assert.equal(p.type, "Time");
-  assert.equal((p.command as Pipeline).commands.length, 2);
+  const p = nodeOfType(parse("time cmd1 | cmd2").commands[0].command, "Pipeline");
+  assert.equal(p.prefixes[0].type, "Time");
+  assert.equal(p.commands.length, 2);
 });
 
 test("time -p flag consumed", () => {
-  const p = parse("time -p cmd").commands[0].command as Time;
-  assert.equal(p.type, "Time");
-  assert.deepEqual(p.posix, { pos: 5, end: 7 });
-  assert.equal((p.command as Command).name?.text, "cmd");
+  const p = nodeOfType(parse("time -p cmd").commands[0].command, "Pipeline");
+  assert.deepEqual(nodeOfType(p.prefixes[0], "Time").posix, { pos: 5, end: 7 });
+  assert.equal(nodeOfType(p.commands[0], "Command").name?.text, "cmd");
 });
 
 test("time with negation", () => {
-  const p = parse("time ! cmd").commands[0].command as Time;
-  assert.equal(p.type, "Time");
-  assert.equal(p.command?.type, "Negation");
+  const p = nodeOfType(parse("time ! cmd").commands[0].command, "Pipeline");
+  assert.deepEqual(
+    p.prefixes.map((prefix) => prefix.type),
+    ["Time", "Negation"],
+  );
 });
 
 test("time allows unquoted backslash-newline continuations", () => {
-  const cases: [string, boolean | undefined, number][] = [
-    ["ti\\" + "\nme echo", undefined, 1],
-    ["time\\" + "\n -p echo", undefined, 1],
-    ["ti\\" + "\nme ! echo", true, 1],
-    ["ti\\" + "\nme echo | cat", undefined, 2],
+  const cases: [string, string[], number][] = [
+    ["ti\\" + "\nme echo", ["Time"], 1],
+    ["time\\" + "\n -p echo", ["Time"], 1],
+    ["ti\\" + "\nme ! echo", ["Time", "Negation"], 1],
+    ["ti\\" + "\nme echo | cat", ["Time"], 2],
   ];
-  for (const [source, negated, commandCount] of cases) {
+  for (const [source, prefixes, commandCount] of cases) {
     const ast = parse(source);
-    const time = ast.commands[0].command;
-    assert.ok(time.type === "Time", source);
-    let command = time.command;
-    assert.equal(command?.type === "Negation" || undefined, negated, source);
-    if (command?.type === "Negation") command = command.command;
-    assert.equal(command?.type === "Pipeline" ? command.commands.length : 1, commandCount, source);
+    const pipeline = nodeOfType(ast.commands[0].command, "Pipeline");
+    assert.deepEqual(
+      pipeline.prefixes.map((prefix) => prefix.type),
+      prefixes,
+      source,
+    );
+    assert.equal(pipeline.commands.length, commandCount, source);
     assert.equal(ast.errors, undefined, source);
   }
 });
@@ -202,28 +208,27 @@ test("quoted and escaped time spellings remain command names", () => {
 test("time alone produces a node", () => {
   const ast = parse("time");
   assert.equal(ast.commands.length, 1);
-  const p = ast.commands[0].command as Time;
-  assert.equal(p.type, "Time");
-  assert.equal(p.command, undefined);
-  assert.equal(p.pos, 0);
-  assert.equal(p.end, 4);
+  const p = nodeOfType(ast.commands[0].command, "Pipeline");
+  assert.deepEqual([p.pos, p.end, p.commands], [0, 4, []]);
+  const time = nodeOfType(p.prefixes[0], "Time");
+  assert.deepEqual([time.pos, time.end], [0, 4]);
 });
 
 test("time -p alone produces a node", () => {
   const ast = parse("time -p");
   assert.equal(ast.commands.length, 1);
-  const p = ast.commands[0].command as Time;
-  assert.equal(p.type, "Time");
-  assert.equal(p.command, undefined);
-  assert.deepEqual(p.posix, { pos: 5, end: 7 });
-  assert.equal(p.pos, 0);
-  assert.equal(p.end, 7);
+  const p = nodeOfType(ast.commands[0].command, "Pipeline");
+  assert.deepEqual([p.pos, p.end, p.commands], [0, 7, []]);
+  const time = nodeOfType(p.prefixes[0], "Time");
+  assert.deepEqual(time.posix, { pos: 5, end: 7 });
+  assert.deepEqual([time.pos, time.end], [0, 7]);
 });
 
 test("time on its own line followed by command", () => {
   const ast = parse("time\nfoo");
   assert.equal(ast.commands.length, 2);
-  assert.equal(ast.commands[0].command.type, "Time");
+  const p = nodeOfType(ast.commands[0].command, "Pipeline");
+  assert.deepEqual([p.prefixes.map((prefix) => prefix.type), p.commands], [["Time"], []]);
   assert.equal((ast.commands[1].command as Command).name?.text, "foo");
 });
 
@@ -231,16 +236,14 @@ test("quoted time flags stay operands", () => {
   // Bash runs `time '-p' echo hi` as a command named -p, so the quoted flag is not the
   // POSIX option. The `-p` must survive as the timed pipeline's command name.
   for (const source of ["time '-p' echo hi", 'time "-p" echo hi', "time \\-p echo hi"]) {
-    const pipeline = parse(source).commands[0].command;
-    assert.equal(pipeline.type, "Time", source);
-    const inner = pipeline.type === "Time" ? pipeline.command : undefined;
-    assert.equal(inner?.type === "Command" && inner.name?.value, "-p", source);
+    const pipeline = nodeOfType(parse(source).commands[0].command, "Pipeline");
+    assert.equal(nodeOfType(pipeline.prefixes[0], "Time").posix, undefined, source);
+    assert.equal(nodeOfType(pipeline.commands[0], "Command").name?.value, "-p", source);
   }
 });
 
 test("unquoted time -p is still the POSIX flag", () => {
-  const pipeline = parse("time -p echo hi").commands[0].command;
-  assert.equal(pipeline.type, "Time");
-  const inner = pipeline.type === "Time" ? pipeline.command : undefined;
-  assert.equal(inner?.type === "Command" && inner.name?.value, "echo");
+  const pipeline = nodeOfType(parse("time -p echo hi").commands[0].command, "Pipeline");
+  assert.deepEqual(nodeOfType(pipeline.prefixes[0], "Time").posix, { pos: 5, end: 7 });
+  assert.equal(nodeOfType(pipeline.commands[0], "Command").name?.value, "echo");
 });

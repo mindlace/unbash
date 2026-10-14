@@ -27,12 +27,10 @@ test("truncated if (missing fi) doesn't throw", () => {
 
 test("truncated elif chain keeps valid branch spans", () => {
   const ast = parse("if a; then b; elif c; then d");
-  let branch = nodeOfType(ast.commands[0].command, "If");
+  const command = nodeOfType(ast.commands[0].command, "If");
 
-  for (;;) {
+  for (const branch of [command, ...(command.elif ?? [])]) {
     assert.ok(branch.end >= branch.pos);
-    if (branch.else?.type !== "If") break;
-    branch = branch.else;
   }
 });
 

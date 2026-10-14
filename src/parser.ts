@@ -15,6 +15,7 @@ import type {
   Coproc,
   For,
   Function,
+  Elif,
   If,
   AndOr,
   LogicalOperator,
@@ -25,6 +26,7 @@ import type {
   ParsedScript,
   PipeOperator,
   Pipeline,
+  PipelinePrefix,
   HereDoc,
   Redirection,
   RedirectDescriptor,
@@ -45,7 +47,8 @@ import type {
   While,
   Word,
 } from "./internal-types.ts";
-import { hasEmbeddedWordStructure, LexContext, MAX_SYNTAX_NESTING, Token, Lexer, TokenValue } from "./lexer.ts";
+import { hasEmbeddedWordStructure, LexContext, Token, Lexer, TokenValue } from "./lexer.ts";
+import { MAX_SYNTAX_NESTING } from "./limits.ts";
 import { parseArithmeticExpression } from "./arithmetic.ts";
 import {
   computeWordParts,
@@ -259,28 +262,37 @@ function parseArithmeticWithParts(
   context?: SubstitutionContext,
 ): ArithmeticExpression | undefined {
   if (!hasEmbeddedWordStructure(source, offset, offset + body.length)) {
-    return parseArithmeticExpression(body, offset) ?? undefined;
+    return parseArithmeticExpression(body, offset, undefined, depth) ?? undefined;
   }
   const commandExpansions: import("./internal-types.ts").ArithmeticCommandExpansion[] = [];
   const embeddedWords: import("./internal-types.ts").ArithmeticWord[] = [];
   const lexer = new Lexer(source, 0, source.length, false, context);
+  lexer._nestingDepth = depth;
   const expression =
-    parseArithmeticExpression(body, offset, {
-      commandExpansions,
-      embeddedWords,
-      findClosingBracket: (start, end) => lexer.findClosingBracket(start, end),
-      findClosingBrace: (start, end) => lexer.findClosingBrace(start, end),
-      findClosingParenthesis: (start, end) => lexer.findClosingParenthesis(start, end),
-      findArithmeticExpansionEnd: (start, end) => lexer.findArithmeticExpansionEnd(start, end),
-      findArithmeticWordEnd: (start, end) => lexer.findArithmeticWordEnd(start, end),
-    }) ?? undefined;
-  for (const node of commandExpansions) {
-    if (depth <= MAX_SYNTAX_NESTING) {
+    parseArithmeticExpression(
+      body,
+      offset,
+      {
+        commandExpansions,
+        embeddedWords,
+        findClosingBracket: (start, end) => lexer.findClosingBracket(start, end),
+        findClosingBrace: (start, end) => lexer.findClosingBrace(start, end),
+        findClosingParenthesis: (start, end) => lexer.findClosingParenthesis(start, end),
+        findArithmeticExpansionEnd: (start, end) => lexer.findArithmeticExpansionEnd(start, end),
+        findArithmeticWordEnd: (start, end) => lexer.findArithmeticWordEnd(start, end),
+      },
+      depth,
+    ) ?? undefined;
+  // Past the nesting budget a substitution keeps its text without a script and an embedded
+  // word keeps its text without parts.
+  if (depth <= MAX_SYNTAX_NESTING) {
+    for (const node of commandExpansions) {
       node.script = parseRegion(source, node.pos + 2, node.end - 1, depth + 1, true, lexer.getSubstitutionContext());
     }
+    for (const node of embeddedWords) {
+      node.parts = computeEmbeddedWordParts(source, node, depth, lexer.getSubstitutionContext(), true);
+    }
   }
-  for (const node of embeddedWords)
-    node.parts = computeEmbeddedWordParts(source, node, depth, lexer.getSubstitutionContext(), true);
   return expression;
 }
 
@@ -382,6 +394,8 @@ const BINARY_TEST_OPS: Record<string, 1> = {
 };
 
 const EMPTY_REDIRECTS: Redirection[] = [];
+const EMPTY_PREFIXES: PipelinePrefix[] = [];
+const EMPTY_ELIFS: Elif[] = [];
 
 export function parse(source: string): import("./types.ts").ParsedScript {
   return new Parser(source, 0, source.length).run();
@@ -505,8 +519,6 @@ class Parser {
 
   run(): ParsedScript {
     const start = this.start;
-    // The boundary script one level past the budget still parses (one level is cheap and
-    // iterative) but is flagged: everything below it stays unresolved.
     if (this.depth > MAX_SYNTAX_NESTING) this.error("maximum substitution nesting depth exceeded", start);
     let shebang: string | undefined;
     if (start === 0 && this.source.charCodeAt(0) === 35 && this.source.charCodeAt(1) === 33) {
@@ -540,14 +552,7 @@ class Parser {
       for (let i = 0; i < lexerErrors.length; i++) errors.push(lexerErrors[i]);
     }
     if (this.errors !== null && this.errors.length > 1) this.errors.sort((a, b) => a.pos - b.pos);
-    return {
-      type: "Script",
-      pos: start,
-      end: this.end,
-      shebang,
-      commands,
-      errors: this.errors ?? undefined,
-    };
+    return { type: "Script", pos: start, end: this.end, shebang, commands, errors: this.errors ?? undefined };
   }
 
   private error(message: string, pos: number): void {
@@ -676,8 +681,7 @@ class Parser {
   }
 
   private pipeline(): PipelineNode | null {
-    let prefixes: (Time | Negation)[] | undefined;
-    let exceeded = false;
+    let prefixes: PipelinePrefix[] | undefined;
     for (;;) {
       const token = this.tok.peek(LexContext.CommandStart);
       const isTime = token.token === Token.Word && token.keywordEligible && token.value === "time";
@@ -700,37 +704,29 @@ class Parser {
         }
       }
       if (prefixes === undefined) prefixes = [];
-      if (prefixes.length + this.syntaxDepth === MAX_SYNTAX_NESTING) {
-        if (!exceeded) this.error("maximum pipeline prefix nesting depth exceeded", pos);
-        exceeded = true;
-        continue;
-      }
       prefixes.push(
         isTime
-          ? {
-              type: "Time",
-              pos,
-              end: endOfOptions?.end ?? posix?.end ?? keywordEnd,
-              keywordEnd,
-              posix,
-              endOfOptions,
-              command: undefined,
-            }
-          : { type: "Negation", pos, end: keywordEnd, keywordEnd, command: undefined },
+          ? { type: "Time", pos, end: endOfOptions?.end ?? posix?.end ?? keywordEnd, keywordEnd, posix, endOfOptions }
+          : { type: "Negation", pos, end: keywordEnd },
       );
     }
 
-    if (!prefixes) return this.pipelineCommands();
-    this.syntaxDepth += prefixes.length;
-    let command: PipelineNode | null = this.pipelineCommands();
-    this.syntaxDepth -= prefixes.length;
-    for (let i = prefixes.length - 1; i >= 0; i--) {
-      const prefix = prefixes[i];
-      prefix.command = command ?? undefined;
-      if (command) prefix.end = command.end;
-      command = prefix;
+    const command = this.pipelineCommands();
+    if (!prefixes) return command;
+    const pos = prefixes[0].pos;
+    if (command?.type === "Pipeline") {
+      command.prefixes = prefixes;
+      command.pos = pos;
+      return command;
     }
-    return command;
+    return {
+      type: "Pipeline",
+      pos,
+      end: command ? command.end : prefixes[prefixes.length - 1].end,
+      prefixes,
+      commands: command ? [command] : [],
+      operators: [],
+    } satisfies Pipeline;
   }
 
   private pipelineCommands(): CommandNode | Pipeline | null {
@@ -760,6 +756,7 @@ class Parser {
       type: "Pipeline",
       pos: first.pos,
       end: commands[commands.length - 1].end,
+      prefixes: EMPTY_PREFIXES,
       commands,
       operators,
     };
@@ -884,7 +881,7 @@ class Parser {
 
   // Continues a subshell whose '(' the caller already consumed.
   private subshellBody(pos: number): Subshell {
-    if (this.syntaxDepth === MAX_SYNTAX_NESTING) {
+    if (this.syntaxDepth >= MAX_SYNTAX_NESTING) {
       this.error("maximum subshell nesting depth exceeded", pos);
       const closeEnd = this.tok.skipSubshellBody();
       if (closeEnd < 0) this.error("expected ')' to close subshell", this.tok.getPos());
@@ -906,7 +903,7 @@ class Parser {
   private braceGroup(): BraceGroup {
     const pos = this.tok.next(LexContext.CommandStart).pos;
 
-    if (this.syntaxDepth === MAX_SYNTAX_NESTING) {
+    if (this.syntaxDepth >= MAX_SYNTAX_NESTING) {
       this.error("maximum brace group nesting depth exceeded", pos);
       const closeEnd = this.tok.skipCompoundBody(Token.RBrace);
       if (closeEnd < 0) this.error("expected '}' to close brace group", this.tok.getPos());
@@ -928,7 +925,7 @@ class Parser {
   private ifClause(): If {
     const pos = this.tok.next(LexContext.CommandStart).pos;
 
-    if (this.syntaxDepth === MAX_SYNTAX_NESTING) {
+    if (this.syntaxDepth >= MAX_SYNTAX_NESTING) {
       this.error("maximum if nesting depth exceeded", pos);
       const closeEnd = this.tok.skipCompoundBody(Token.Fi);
       if (closeEnd < 0) this.error("expected 'fi' to close 'if'", this.tok.getPos());
@@ -939,72 +936,60 @@ class Parser {
         end,
         clause: this.makeCompoundList([]),
         then: this.makeCompoundList([]),
+        elif: EMPTY_ELIFS,
         else: undefined,
       };
     }
 
     this.syntaxDepth++;
-    let firstBranch: If | undefined;
-    let lastBranch: If | undefined;
+    let command: If | undefined;
     let branchPos = pos;
-    let clause: CompoundList;
-    let then_: CompoundList;
     for (;;) {
       const clauseCommands = this.list();
       const emptyClausePos = this.emptyListPos(clauseCommands);
-      clause = this.makeCompoundList(clauseCommands);
+      const clause = this.makeCompoundList(clauseCommands);
       this.skipSemi();
       const thenToken = this.accept(Token.Then, LexContext.CommandStart);
       if (!thenToken) this.error("expected 'then'", this.tok.getPos());
       else if (emptyClausePos >= 0)
         this.error(`expected command after '${branchPos === pos ? "if" : "elif"}'`, emptyClausePos);
       const thenCommands = this.list();
-      if (thenToken && thenCommands.length === 0)
+      const then_ = this.makeCompoundList(thenCommands);
+      if (thenToken && thenCommands.length === 0) {
         this.error("expected command after 'then'", this.tok.peek(LexContext.CommandStart).pos);
-      then_ = this.makeCompoundList(thenCommands);
+        then_.pos = thenToken.end;
+        then_.end = thenToken.end;
+      }
+      if (command) {
+        if (command.elif === EMPTY_ELIFS) command.elif = [];
+        command.elif.push({
+          type: "Elif",
+          pos: branchPos,
+          end: then_.end,
+          clause,
+          then: then_,
+        });
+      } else {
+        command = { type: "If", pos, end: pos, clause, then: then_, elif: EMPTY_ELIFS, else: undefined };
+      }
       this.skipSemi();
       const elif = this.accept(Token.Elif, LexContext.CommandStart);
       if (!elif) break;
-      const branch: If = {
-        type: "If",
-        pos: branchPos,
-        end: branchPos,
-        clause,
-        then: then_,
-        else: undefined,
-      };
-      if (lastBranch) lastBranch.else = branch;
-      else firstBranch = branch;
-      lastBranch = branch;
       branchPos = elif.pos;
     }
 
-    let else_: CompoundList | If | undefined;
-    let end: number;
     if (this.accept(Token.Else, LexContext.CommandStart)) {
       const elseCommands = this.list();
       const emptyElsePos = this.emptyListPos(elseCommands);
       if (emptyElsePos >= 0) this.error("expected command after 'else'", emptyElsePos);
-      else_ = this.makeCompoundList(elseCommands);
+      command.else = this.makeCompoundList(elseCommands);
       this.skipSemi();
-      const closeEnd = this.acceptEnd(Token.Fi, LexContext.CommandStart);
-      if (closeEnd < 0) this.error("expected 'fi' to close 'if'", this.tok.getPos());
-      end = closeEnd >= 0 ? closeEnd : branchPos;
-    } else {
-      const closeEnd = this.acceptEnd(Token.Fi, LexContext.CommandStart);
-      if (closeEnd < 0) this.error("expected 'fi' to close 'if'", this.tok.getPos());
-      end = closeEnd >= 0 ? closeEnd : branchPos;
     }
+    const closeEnd = this.acceptEnd(Token.Fi, LexContext.CommandStart);
+    if (closeEnd < 0) this.error("expected 'fi' to close 'if'", this.tok.getPos());
+    command.end = closeEnd >= 0 ? closeEnd : branchPos;
     this.syntaxDepth--;
-    const finalBranch: If = { type: "If", pos: branchPos, end, clause, then: then_, else: else_ };
-    if (!firstBranch) return finalBranch;
-    lastBranch!.else = finalBranch;
-    let branch: If | CompoundList | undefined = firstBranch;
-    while (branch?.type === "If") {
-      branch.end = end;
-      branch = branch.else;
-    }
-    return firstBranch;
+    return command;
   }
 
   // for_clause := FOR word [IN word* (';'|NL)] DO list DONE
@@ -1035,7 +1020,7 @@ class Parser {
     const hasDo = this.accept(Token.Do, LexContext.CommandStart) !== null;
     if (!hasDo) this.error("expected 'do'", this.tok.getPos());
 
-    if (this.syntaxDepth === MAX_SYNTAX_NESTING) {
+    if (this.syntaxDepth >= MAX_SYNTAX_NESTING) {
       this.error("maximum for nesting depth exceeded", pos);
       const closeEnd = this.tok.skipCompoundBody(Token.Done);
       if (closeEnd < 0) this.error("expected 'done' to close 'for'", this.tok.getPos());
@@ -1078,7 +1063,7 @@ class Parser {
     const hasDo = this.accept(Token.Do, LexContext.CommandStart) !== null;
     if (!hasDo) this.error("expected 'do'", this.tok.getPos());
 
-    if (this.syntaxDepth === MAX_SYNTAX_NESTING) {
+    if (this.syntaxDepth >= MAX_SYNTAX_NESTING) {
       this.error("maximum for nesting depth exceeded", pos);
       const closeEnd = this.tok.skipCompoundBody(Token.Done);
       if (closeEnd < 0) this.error("expected 'done' to close 'for'", this.tok.getPos());
@@ -1132,7 +1117,7 @@ class Parser {
   private whileOrUntil(kind: "while" | "until"): While {
     const pos = this.tok.next(LexContext.CommandStart).pos;
 
-    if (this.syntaxDepth === MAX_SYNTAX_NESTING) {
+    if (this.syntaxDepth >= MAX_SYNTAX_NESTING) {
       this.error(`maximum ${kind} nesting depth exceeded`, pos);
       const closeEnd = this.tok.skipCompoundBody(Token.Done);
       if (closeEnd < 0) this.error(`expected 'done' to close '${kind}'`, this.tok.getPos());
@@ -1173,7 +1158,7 @@ class Parser {
       this.error("expected 'in' after 'case' word", this.tok.getPos());
     this.skipNewlines(LexContext.CasePattern);
 
-    if (this.syntaxDepth === MAX_SYNTAX_NESTING) {
+    if (this.syntaxDepth >= MAX_SYNTAX_NESTING) {
       this.error("maximum case nesting depth exceeded", pos);
       const closeEnd = this.tok.skipCompoundBody(Token.Esac);
       if (closeEnd < 0) this.error("expected 'esac' to close 'case'", this.tok.getPos());
@@ -1270,7 +1255,7 @@ class Parser {
     const hasDo = this.accept(Token.Do, LexContext.CommandStart) !== null;
     if (!hasDo) this.error("expected 'do'", this.tok.getPos());
 
-    if (this.syntaxDepth === MAX_SYNTAX_NESTING) {
+    if (this.syntaxDepth >= MAX_SYNTAX_NESTING) {
       this.error("maximum select nesting depth exceeded", pos);
       const closeEnd = this.tok.skipCompoundBody(Token.Done);
       if (closeEnd < 0) this.error("expected 'done' to close 'select'", this.tok.getPos());
@@ -1300,38 +1285,38 @@ class Parser {
 
   // test_or := test_and ('||' test_and)*
   private parseTestOr(): TestExpression {
-    let left = this.parseTestAnd();
-    while (this.tok.peek(LexContext.TestMode).token === Token.Or) {
+    const first = this.parseTestAnd();
+    if (this.tok.peek(LexContext.TestMode).token !== Token.Or) return first;
+    const operands = [first];
+    do {
       this.tok.next(LexContext.TestMode);
-      const right = this.parseTestAnd();
-      left = {
-        type: "TestLogical",
-        pos: left.pos,
-        end: right.end,
-        operator: "||",
-        left,
-        right,
-      } satisfies TestLogicalExpression;
-    }
-    return left;
+      operands.push(this.parseTestAnd());
+    } while (this.tok.peek(LexContext.TestMode).token === Token.Or);
+    return {
+      type: "TestLogical",
+      pos: first.pos,
+      end: operands[operands.length - 1].end,
+      operator: "||",
+      operands,
+    } satisfies TestLogicalExpression;
   }
 
   // test_and := test_not ('&&' test_not)*
   private parseTestAnd(): TestExpression {
-    let left = this.parseTestNot();
-    while (this.tok.peek(LexContext.TestMode).token === Token.And) {
+    const first = this.parseTestNot();
+    if (this.tok.peek(LexContext.TestMode).token !== Token.And) return first;
+    const operands = [first];
+    do {
       this.tok.next(LexContext.TestMode);
-      const right = this.parseTestNot();
-      left = {
-        type: "TestLogical",
-        pos: left.pos,
-        end: right.end,
-        operator: "&&",
-        left,
-        right,
-      } satisfies TestLogicalExpression;
-    }
-    return left;
+      operands.push(this.parseTestNot());
+    } while (this.tok.peek(LexContext.TestMode).token === Token.And);
+    return {
+      type: "TestLogical",
+      pos: first.pos,
+      end: operands[operands.length - 1].end,
+      operator: "&&",
+      operands,
+    } satisfies TestLogicalExpression;
   }
 
   // test_not := '!' test_not | test_primary
@@ -1339,29 +1324,14 @@ class Parser {
     let t = this.tok.peek(LexContext.TestMode);
     if (!isTestNegation(t)) return this.parseTestPrimary();
 
-    const firstPos = this.tok.next(LexContext.TestMode).pos;
-    t = this.tok.peek(LexContext.TestMode);
-    if (!isTestNegation(t)) {
-      const operand = this.parseTestPrimary();
-      return { type: "TestNot", pos: firstPos, end: operand.end, operand } satisfies TestNotExpression;
-    }
-
-    const positions = [firstPos];
+    const negations: Negation[] = [];
     while (isTestNegation(t)) {
-      positions.push(this.tok.next(LexContext.TestMode).pos);
+      const bang = this.tok.next(LexContext.TestMode);
+      negations.push({ type: "Negation", pos: bang.pos, end: bang.end });
       t = this.tok.peek(LexContext.TestMode);
     }
-
-    let expression = this.parseTestPrimary();
-    for (let i = positions.length - 1; i >= 0; i--) {
-      expression = {
-        type: "TestNot",
-        pos: positions[i],
-        end: expression.end,
-        operand: expression,
-      } satisfies TestNotExpression;
-    }
-    return expression;
+    const operand = this.parseTestPrimary();
+    return { type: "TestNot", pos: negations[0].pos, end: operand.end, negations, operand } satisfies TestNotExpression;
   }
 
   // test_primary := '(' test_or ')' | unary_op word | word binary_op word | word
@@ -1370,7 +1340,7 @@ class Parser {
     if (this.tok.peek(LexContext.TestMode).token === Token.LParen) {
       const openPos = this.tok.next(LexContext.TestMode).pos;
 
-      if (this.syntaxDepth === MAX_SYNTAX_NESTING) {
+      if (this.syntaxDepth >= MAX_SYNTAX_NESTING) {
         this.error("maximum test group nesting depth exceeded", openPos);
         const closeEnd = this.tok.skipTestGroup();
         if (closeEnd < 0) this.error("expected ')' to close test group", this.tok.getPos());
