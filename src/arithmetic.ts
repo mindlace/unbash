@@ -1,4 +1,5 @@
-import type { ArithmeticCommandExpansion, ArithmeticExpression, ArithmeticWord } from "./internal-types.ts";
+import type { ArithmeticExpression, ArithmeticWord } from "./internal-types.ts";
+import { ScriptExpansionImpl } from "./expansion.ts";
 import { MAX_SYNTAX_NESTING } from "./limits.ts";
 import {
   CH_TAB,
@@ -119,8 +120,9 @@ function opRightAssoc(op: string): boolean {
 }
 
 export interface ArithmeticParseCollector {
-  commandExpansions: ArithmeticCommandExpansion[];
   embeddedWords: ArithmeticWord[];
+  // Builds a `$(…)` node whose script defers against the enclosing source and nesting budget.
+  commandExpansion: (pos: number, end: number, text: string) => ScriptExpansionImpl<"ArithmeticCommandExpansion">;
   findClosingBracket?: (start: number, end: number) => number;
   // Embedded `$(`, `${`, and `$((` require the lexer's shell-aware delimiter scanners;
   // bodies parsed without a collector cannot contain them (see hasEmbeddedWordStructure).
@@ -138,7 +140,6 @@ export function parseArithmeticExpression(
 ): ArithmeticExpression | null {
   let pos = 0;
   const len = src.length;
-  const initialCommandCount = collector?.commandExpansions.length ?? 0;
   const initialWordCount = collector?.embeddedWords.length ?? 0;
 
   function makeWord(start: number, end: number, embedded = false): ArithmeticWord {
@@ -326,7 +327,6 @@ export function parseArithmeticExpression(
     skipWS();
     const start = pos;
     if (start === len) return makeWord(start, start);
-    const commandCount = collector?.commandExpansions.length ?? 0;
     const wordCount = collector?.embeddedWords.length ?? 0;
     let ternaries = 0;
     for (;;) {
@@ -345,10 +345,7 @@ export function parseArithmeticExpression(
       }
       if (op === "?") ternaries++;
     }
-    if (collector) {
-      collector.commandExpansions.length = commandCount;
-      collector.embeddedWords.length = wordCount;
-    }
+    if (collector) collector.embeddedWords.length = wordCount;
     return makeWord(start, trimEnd(src, start, pos));
   }
 
@@ -475,15 +472,11 @@ export function parseArithmeticExpression(
     // Dollar expansion
     if (c === CH_DOLLAR) {
       const start = pos;
-      const commandCount = collector?.commandExpansions.length ?? 0;
       const wordCount = collector?.embeddedWords.length ?? 0;
       const atom = readDollarAtom();
       const wordEnd = collector?.findArithmeticWordEnd?.(start + offset, offset + len) ?? pos + offset;
       if (wordEnd > pos + offset) {
-        if (collector) {
-          collector.commandExpansions.length = commandCount;
-          collector.embeddedWords.length = wordCount;
-        }
+        if (collector) collector.embeddedWords.length = wordCount;
         pos = wordEnd - offset;
         return makeWord(start, pos, true);
       }
@@ -552,15 +545,9 @@ export function parseArithmeticExpression(
           }
         }
         const text = src.slice(start, pos);
-        const node: ArithmeticCommandExpansion = {
-          type: "ArithmeticCommandExpansion",
-          pos: start + offset,
-          end: pos + offset,
-          text,
-          script: undefined,
-        };
-        collector?.commandExpansions.push(node);
-        return node;
+        return collector
+          ? collector.commandExpansion(start + offset, pos + offset, text)
+          : new ScriptExpansionImpl("ArithmeticCommandExpansion", start + offset, pos + offset, text);
       }
     } else if (c === CH_LBRACE) {
       // ${ parameter expansion }
@@ -645,10 +632,7 @@ export function parseArithmeticExpression(
   if (pos < len) {
     // Unparsed tokens remain: a partial tree would silently drop them, so keep the whole body
     // as one word. With embedded structure its parts still expose nested substitutions.
-    if (collector) {
-      collector.commandExpansions.length = initialCommandCount;
-      collector.embeddedWords.length = initialWordCount;
-    }
+    if (collector) collector.embeddedWords.length = initialWordCount;
     return makeWord(start, trimEnd(src, start, len), collector !== undefined);
   }
   return result;

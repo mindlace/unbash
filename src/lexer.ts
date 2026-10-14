@@ -1,18 +1,20 @@
 // oxlint-disable unicorn/no-thenable
 import type {
-  ArithmeticCommandExpansion,
-  CommandExpansionPart,
   DoubleQuotedChild,
   ExtGlobOperator,
   HereDoc,
   ParameterExpansionPart,
   ParseError,
-  ProcessSubstitutionPart,
   Word,
   WordPart,
 } from "./internal-types.ts";
 import { decodeAnsiCQuoted } from "./ansi-c.ts";
-import { parseArithmeticExpression } from "./arithmetic.ts";
+import {
+  ArithmeticExpansionImpl,
+  ProcessSubstitutionImpl,
+  ScriptExpansionImpl,
+  type ScriptWindow,
+} from "./expansion.ts";
 import { MAX_SYNTAX_NESTING } from "./limits.ts";
 import { WordImpl } from "./word.ts";
 import { createSubstitutionContext, type SubstitutionContext } from "./substitution-context.ts";
@@ -433,16 +435,6 @@ interface PendingHereDoc {
   target?: HereDoc;
 }
 
-type DeferredCommandExpansion = [
-  CommandExpansionPart | ProcessSubstitutionPart | ArithmeticCommandExpansion,
-  number,
-  string,
-  number | undefined,
-  boolean,
-];
-
-const NO_EXPANSIONS: DeferredCommandExpansion[] = [];
-
 function setToken(out: TokenValue, token: Token, value: string, pos: number = 0, end: number = 0): void {
   out.token = token;
   out._value = value;
@@ -549,7 +541,6 @@ export class Lexer {
   private nextState: TokenValue;
   private hasPeek: boolean;
   private pendingHereDocs: PendingHereDoc[] | null;
-  private collectedExpansions: DeferredCommandExpansion[] | null;
   private substitutionContext: SubstitutionContext;
   _errors: ParseError[] | null = null;
   _buildParts = false;
@@ -579,7 +570,6 @@ export class Lexer {
     this.nextState = new TokenValue(this);
     this.hasPeek = false;
     this.pendingHereDocs = null;
-    this.collectedExpansions = null;
     this.substitutionContext = context;
 
     if (start === 0 && src.charCodeAt(0) === CH_HASH && src.charCodeAt(1) === CH_BANG) {
@@ -607,20 +597,42 @@ export class Lexer {
     return this._errors ?? (this._errors = []);
   }
 
-  getCollectedExpansions(): DeferredCommandExpansion[] {
-    return this.collectedExpansions ?? NO_EXPANSIONS;
+  // A substitution's script parses lazily, one level below the window it was found in, in
+  // place over `inner` at `start`, sharing this scan's substitution boundaries.
+  private commandExpansion(
+    pos: number,
+    text: string,
+    start: number,
+    inner: string,
+    parenBoundary = false,
+  ): ScriptExpansionImpl<"CommandExpansion"> {
+    const window = this.scriptWindow(this.src, start, start + inner.length, parenBoundary);
+    return new ScriptExpansionImpl("CommandExpansion", pos, this.pos, text, window);
   }
 
-  // Collected expansions resolve after the enclosing scan unwinds, so each records the
-  // depth it was found at; resolveCollected charges that depth against the shared budget.
-  private collect(part: DeferredCommandExpansion[0], inner: string, innerStart?: number, parenBoundary = false): void {
-    (this.collectedExpansions ?? (this.collectedExpansions = [])).push([
-      part,
-      this._nestingDepth,
-      inner,
-      innerStart,
-      parenBoundary,
-    ]);
+  // Escaped backticks rebuild `inner` with the escapes removed, so it is no longer a verbatim
+  // substring of the source: that script parses the decoded body as its own source.
+  private decodedCommandExpansion(pos: number, text: string, inner: string): ScriptExpansionImpl<"CommandExpansion"> {
+    const window = this.scriptWindow(inner, 0, inner.length, false, true);
+    return new ScriptExpansionImpl("CommandExpansion", pos, this.pos, text, window);
+  }
+
+  private processSubstitution(pos: number, text: string, operator: "<" | ">", inner: string): ProcessSubstitutionImpl {
+    const window = this.scriptWindow(this.src, pos + 2, pos + 2 + inner.length, !this._unbalanced);
+    return new ProcessSubstitutionImpl(pos, this.pos, text, operator, window);
+  }
+
+  // Past the nesting budget the part gets no window, so lazy materialization bottoms out.
+  private scriptWindow(
+    source: string,
+    start: number,
+    end: number,
+    parenBoundary: boolean,
+    decoded = false,
+  ): ScriptWindow | undefined {
+    if (this._nestingDepth > MAX_SYNTAX_NESTING) return undefined;
+    const context = decoded ? undefined : this.substitutionContext;
+    return { source, start, end, depth: this._nestingDepth + 1, parenBoundary, context };
   }
 
   getPos(): number {
@@ -1192,15 +1204,7 @@ export class Lexer {
       this.pos = startPos + 2;
       const inner = this.extractBalanced();
       const text = this.src.slice(startPos, this.pos);
-      const part: import("./internal-types.ts").ProcessSubstitutionPart = {
-        type: "ProcessSubstitution",
-        pos: startPos,
-        end: this.pos,
-        text,
-        operator: ch === 0x3c ? "<" : ">",
-        script: undefined,
-      };
-      this.collect(part, inner, startPos + 2, !this._unbalanced);
+      const part = this.processSubstitution(startPos, text, ch === 0x3c ? "<" : ">", inner);
       // Continue reading any trailing word text (e.g., suffix after proc sub)
       if (this.pos < this.srcEnd) {
         this.readWordText();
@@ -2803,16 +2807,7 @@ export class Lexer {
             });
             litBuf = "";
           }
-          const part: import("./internal-types.ts").ProcessSubstitutionPart = {
-            type: "ProcessSubstitution",
-            pos: psStart,
-            end: pos,
-            text: raw,
-            operator: ch === CH_LT ? "<" : ">",
-            script: undefined,
-          };
-          parts!.push(part);
-          this.collect(part, inner, psStart + 2, !this._unbalanced);
+          parts!.push(this.processSubstitution(psStart, raw, ch === CH_LT ? "<" : ">", inner));
           litStart = pos;
         }
         continue;
@@ -3233,13 +3228,7 @@ export class Lexer {
         this._resultIsRaw = true;
         this._resultHasExpansion = false;
         this._resultPart = this._buildParts
-          ? {
-              type: "ArithmeticExpansion",
-              pos: bodyStart - 2,
-              end: this.pos,
-              text,
-              expression: this.buildArithmeticExpression(body, bodyStart),
-            }
+          ? this.arithmeticExpansion(bodyStart - 2, text, body, bodyStart)
           : undefined;
         return;
       }
@@ -3356,49 +3345,22 @@ export class Lexer {
     this._resultText = text;
     this._resultIsRaw = true;
     this._resultHasExpansion = false;
-    this._resultPart = this._buildParts
-      ? {
-          type: "ArithmeticExpansion",
-          pos: dollarPos,
-          end: this.pos,
-          text,
-          expression: this.buildArithmeticExpression(body, bodyStart),
-        }
-      : undefined;
+    this._resultPart = this._buildParts ? this.arithmeticExpansion(dollarPos, text, body, bodyStart) : undefined;
   }
 
-  // Pass the absolute body offset so arithmetic nodes index the original source directly
-  // (no re-basing). Nested $(...) command subs inside the arithmetic get an absolute
-  // innerStart so resolveCollected parses their window in place.
-  private buildArithmeticExpression(
+  private arithmeticExpansion(
+    pos: number,
+    text: string,
     body: string,
     bodyStart: number,
-  ): import("./internal-types.ts").ArithmeticExpression | undefined {
-    if (!hasEmbeddedWordStructure(this.src, bodyStart, bodyStart + body.length)) {
-      return parseArithmeticExpression(body, bodyStart, undefined, this._nestingDepth) ?? undefined;
-    }
-    const commandExpansions: import("./internal-types.ts").ArithmeticCommandExpansion[] = [];
-    const embeddedWords: import("./internal-types.ts").ArithmeticWord[] = [];
-    const expr =
-      parseArithmeticExpression(
-        body,
-        bodyStart,
-        {
-          commandExpansions,
-          embeddedWords,
-          findClosingBracket: (start, end) => this.findClosingBracket(start, end),
-          findClosingBrace: (start, end) => this.findClosingBrace(start, end),
-          findClosingParenthesis: (start, end) => this.findClosingParenthesis(start, end),
-          findArithmeticExpansionEnd: (start, end) => this.findArithmeticExpansionEnd(start, end),
-          findArithmeticWordEnd: (start, end) => this.findArithmeticWordEnd(start, end),
-        },
-        this._nestingDepth,
-      ) ?? undefined;
-    for (const node of commandExpansions) {
-      this.collect(node, node.text.slice(2, -1), node.pos + 2, true);
-    }
-    for (const node of embeddedWords) node.parts = this.parseSubFieldWord(node.pos, node.end, "embedded", true).parts;
-    return expr;
+  ): import("./internal-types.ts").ArithmeticExpansionPart {
+    return new ArithmeticExpansionImpl(pos, this.pos, text, {
+      source: this.src,
+      body,
+      offset: bodyStart,
+      depth: this._nestingDepth,
+      context: this.substitutionContext,
+    });
   }
 
   private readArithmeticCommand(out: TokenValue, tokenStart: number): void {
@@ -3424,8 +3386,7 @@ export class Lexer {
     this._resultIsRaw = openPos === dollarPos + 1;
     this._resultHasExpansion = true;
     if (this._buildParts) {
-      this._resultPart = { type: "CommandExpansion", pos: dollarPos, end: this.pos, text: rawText, script: undefined };
-      this.collect(this._resultPart, inner, openPos + 1, !this._unbalanced);
+      this._resultPart = this.commandExpansion(dollarPos, rawText, openPos + 1, inner, !this._unbalanced);
     } else {
       this._resultPart = undefined;
     }
@@ -3474,8 +3435,7 @@ export class Lexer {
       this._resultText = text;
       if (this._buildParts) {
         const innerStart = start + (rawInner.length - rawInner.trimStart().length);
-        this._resultPart = { type: "CommandExpansion", pos: dollarPos, end: this.pos, text, script: undefined };
-        this.collect(this._resultPart, inner, innerStart);
+        this._resultPart = this.commandExpansion(dollarPos, text, innerStart, inner);
       } else {
         this._resultPart = undefined;
       }
@@ -3547,16 +3507,9 @@ export class Lexer {
     this._resultText = inner;
     this._resultHasExpansion = true;
     if (this._buildParts) {
-      // Escaped backticks rebuild `inner` (escapes removed), so its offsets no
-      // longer map linearly onto the source — leave innerStart undefined there.
-      this._resultPart = {
-        type: "CommandExpansion",
-        pos: start - 1,
-        end: this.pos,
-        text,
-        script: undefined,
-      };
-      this.collect(this._resultPart, inner, hasEscapes ? undefined : start);
+      this._resultPart = hasEscapes
+        ? this.decodedCommandExpansion(start - 1, text, inner)
+        : this.commandExpansion(start - 1, text, start, inner);
     } else {
       this._resultPart = undefined;
     }

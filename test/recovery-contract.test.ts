@@ -1,17 +1,20 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { parse } from "../src/parser.ts";
+import { forEachChild, parse } from "../src/parser.ts";
 import { print } from "../src/printer.ts";
 import type { SyntaxNode } from "../src/types.ts";
 import { nodeOfType } from "./ast-helpers.ts";
 
-// Serialization materializes every lazy payload, so nested scripts are visited in source order.
 function commandNames(root: SyntaxNode): string[] {
   const names: string[] = [];
-  JSON.stringify(root, (_key, value) => {
-    if (value?.type === "Command" && value.name) names.push(value.name.value);
-    return value;
-  });
+  const pending = [root];
+  while (pending.length > 0) {
+    const node = pending.pop()!;
+    if (node.type === "Command" && node.name) names.push(node.name.value);
+    const children: SyntaxNode[] = [];
+    forEachChild(node, (child) => children.push(child));
+    for (let i = children.length - 1; i >= 0; i--) pending.push(children[i]);
+  }
   return names;
 }
 

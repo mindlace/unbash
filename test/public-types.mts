@@ -1,4 +1,5 @@
 import {
+  forEachChild,
   parse,
   type AndOr,
   type ArrayValue,
@@ -37,6 +38,13 @@ import {
 import { print } from "unbash/printer";
 
 const script = parse("echo ${name:-value}");
+const traversalResult: void = forEachChild(script, (child) => {
+  const node: SyntaxNode = child;
+  void node;
+  // @ts-expect-error traversal children retain readonly syntax fields
+  child.pos = 0;
+});
+void traversalResult;
 const output: string = print(script);
 void output;
 

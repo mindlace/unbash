@@ -2,7 +2,7 @@ import assert from "assert";
 import * as parser from "unbash";
 import * as printer from "unbash/printer";
 
-assert.deepStrictEqual(Object.keys(parser), ["parse", "parseRegion"]);
+assert.deepStrictEqual(Object.keys(parser), ["forEachChild", "parse", "parseRegion"]);
 assert.deepStrictEqual(Object.keys(printer), ["print"]);
 
 for (const [source, expected] of [
@@ -26,6 +26,22 @@ for (const [source, expected] of [
 
 const globWord = parser.parse("echo *.js").commands[0].command.suffix[0];
 assert.strictEqual(globWord.parts[0].type, "Glob");
+assert.strictEqual(globWord.parts[0].kind, "star");
+assert.strictEqual(globWord.parts[0].value, "*");
+const commands = [];
+function visit(node) {
+  if (node.type === "Command" && node.name) commands.push(node.name.value);
+  parser.forEachChild(node, visit);
+}
+visit(parser.parse("if check; then yes; elif other; then pnpm --filter=[$(git rev-parse HEAD~1)] exec pnpm pack; fi"));
+assert.deepStrictEqual(commands, ["check", "yes", "other", "pnpm", "git"]);
+const deep = parser.parse("echo $((" + "(".repeat(300) + "1" + ")".repeat(300) + "))");
+const deepWord = deep.commands[0].command.args[0];
+assert.strictEqual(deepWord.value, deepWord.text);
+const deepLimit = [{ message: "maximum arithmetic expression nesting depth exceeded", pos: 264 }];
+assert.deepStrictEqual(deep.errors, deepLimit);
+assert.strictEqual(deepWord.parts[0].expression.type, "ArithmeticGroup");
+assert.deepStrictEqual(deep.errors, deepLimit);
 const recovered = parser.parse("( ".repeat(257) + ":" + " )".repeat(257) + "; after");
 assert.strictEqual(recovered.commands[1].command.name.value, "after");
 assert.deepStrictEqual(recovered.errors, [{ message: "maximum subshell nesting depth exceeded", pos: 512 }]);

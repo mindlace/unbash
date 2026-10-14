@@ -2,6 +2,7 @@ import { nodeOfType } from "./ast-helpers.ts";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { parseArithmeticExpression, type ArithmeticParseCollector } from "../src/arithmetic.ts";
+import { ScriptExpansionImpl } from "../src/expansion.ts";
 import { Lexer } from "../src/lexer.ts";
 import { parse } from "../src/parser.ts";
 import { computeWordParts } from "../src/parts.ts";
@@ -10,12 +11,12 @@ import type { ArithmeticExpression } from "../src/types.ts";
 const getCmd = (ast: ReturnType<typeof parse>, i = 0) => nodeOfType(ast.commands[i].command, "Command");
 
 // Expressions embedding `$(`, `${`, or `$((` require the lexer's delimiter scanners,
-// wired exactly as the production callers wire them.
+// wired exactly as the production callers wire them; command substitutions stay raw.
 const collectorFor = (src: string): ArithmeticParseCollector => {
   const lexer = new Lexer(src);
   return {
-    commandExpansions: [],
     embeddedWords: [],
+    commandExpansion: (pos, end, text) => new ScriptExpansionImpl("ArithmeticCommandExpansion", pos, end, text),
     findClosingBracket: (start, end) => lexer.findClosingBracket(start, end),
     findClosingBrace: (start, end) => lexer.findClosingBrace(start, end),
     findClosingParenthesis: (start, end) => lexer.findClosingParenthesis(start, end),

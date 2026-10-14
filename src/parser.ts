@@ -1,5 +1,6 @@
 // oxlint-disable unicorn/no-thenable
 export type * from "./types.ts";
+export { forEachChild } from "./traversal.ts";
 
 import type {
   ArithmeticCommand,
@@ -47,17 +48,20 @@ import type {
   While,
   Word,
 } from "./internal-types.ts";
-import { hasEmbeddedWordStructure, LexContext, Token, Lexer, TokenValue } from "./lexer.ts";
+import { LexContext, Token, Lexer, TokenValue } from "./lexer.ts";
 import { MAX_SYNTAX_NESTING } from "./limits.ts";
-import { parseArithmeticExpression } from "./arithmetic.ts";
-import { computeEmbeddedWordParts, computeBareWordParts, wordPartsResolver, embeddedPartsResolver } from "./parts.ts";
+import { parseArithmeticWithParts } from "./arithmetic-parts.ts";
+import { computeBareWordParts, wordPartsResolver, embeddedPartsResolver } from "./parts.ts";
 import { createSubstitutionContext, substitutionBoundaries, type SubstitutionContext } from "./substitution-context.ts";
 import { WordImpl } from "./word.ts";
 import { AssignmentImpl } from "./assignment.ts";
 import { CommandImpl } from "./command.ts";
 import { HereDocBodyImpl } from "./heredoc.ts";
+import { ArithmeticExpansionImpl, ScriptExpansionImpl } from "./expansion.ts";
 
 Lexer._findSubstitutionEnd = findSubstitutionEnd;
+ScriptExpansionImpl._resolveScript = parseRegion;
+ArithmeticExpansionImpl._resolveExpression = parseArithmeticWithParts;
 
 function isDeclarationCommand(name: string): boolean {
   switch (name.length) {
@@ -244,48 +248,6 @@ const REDIRECT_OPS: Record<string, RedirectOperator> = {
   "&>": "&>",
   "&>>": "&>>",
 };
-
-function parseArithmeticWithParts(
-  body: string,
-  offset: number,
-  source: string,
-  depth: number,
-  context: SubstitutionContext,
-): ArithmeticExpression | undefined {
-  if (!hasEmbeddedWordStructure(source, offset, offset + body.length)) {
-    return parseArithmeticExpression(body, offset, undefined, depth) ?? undefined;
-  }
-  const commandExpansions: import("./internal-types.ts").ArithmeticCommandExpansion[] = [];
-  const embeddedWords: import("./internal-types.ts").ArithmeticWord[] = [];
-  const lexer = new Lexer(source, 0, source.length, false, context);
-  lexer._nestingDepth = depth;
-  const expression =
-    parseArithmeticExpression(
-      body,
-      offset,
-      {
-        commandExpansions,
-        embeddedWords,
-        findClosingBracket: (start, end) => lexer.findClosingBracket(start, end),
-        findClosingBrace: (start, end) => lexer.findClosingBrace(start, end),
-        findClosingParenthesis: (start, end) => lexer.findClosingParenthesis(start, end),
-        findArithmeticExpansionEnd: (start, end) => lexer.findArithmeticExpansionEnd(start, end),
-        findArithmeticWordEnd: (start, end) => lexer.findArithmeticWordEnd(start, end),
-      },
-      depth,
-    ) ?? undefined;
-  // Past the nesting budget a substitution keeps its text without a script and an embedded
-  // word keeps its text without parts.
-  if (depth <= MAX_SYNTAX_NESTING) {
-    for (const node of commandExpansions) {
-      node.script = parseRegion(source, node.pos + 2, node.end - 1, depth + 1, true, context);
-    }
-    for (const node of embeddedWords) {
-      node.parts = computeEmbeddedWordParts(source, node, depth, context, true);
-    }
-  }
-  return expression;
-}
 
 // Lookup tables for O(1) token classification (replaces sequential comparisons)
 const listTerminators = new Uint8Array(37);

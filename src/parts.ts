@@ -1,9 +1,7 @@
 import type { Word, WordPart } from "./internal-types.ts";
 import { hasEmbeddedWordStructure, Lexer } from "./lexer.ts";
-import { parseRegion } from "./parser.ts";
 import type { PartsResolver } from "./word.ts";
 import { createSubstitutionContext, type SubstitutionContext } from "./substitution-context.ts";
-import { MAX_SYNTAX_NESTING } from "./limits.ts";
 import { hasGlobCharacters, parseGlobParts } from "./glob.ts";
 
 export const computeBareWordParts: PartsResolver = (_source, word) =>
@@ -48,9 +46,7 @@ export function computeWordParts(
   const lexer = new Lexer(source, word.pos, word.end, false, context);
   lexer._nestingDepth = depth;
   const parts = lexer.buildWordParts(word.pos);
-  if (!parts) return undefined;
-  resolveCollected(lexer);
-  return parts;
+  return parts ?? undefined;
 }
 
 /** Compute structural parts for a word-like span that may contain shell operators or whitespace. */
@@ -65,9 +61,7 @@ export function computeEmbeddedWordParts(
   const lexer = new Lexer(source, word.pos, word.end, false, context);
   lexer._nestingDepth = depth;
   const parts = lexer.buildEmbeddedWordParts(word.pos, arithmetic);
-  if (!parts) return undefined;
-  resolveCollected(lexer);
-  return parts;
+  return parts ?? undefined;
 }
 
 export function computeArrayElementParts(
@@ -79,9 +73,7 @@ export function computeArrayElementParts(
   const lexer = new Lexer(source, word.pos, word.end, false, context);
   lexer._nestingDepth = depth;
   const parts = lexer.buildArrayElementParts(word.pos);
-  if (!parts) return undefined;
-  resolveCollected(lexer);
-  return parts;
+  return parts ?? undefined;
 }
 
 /**
@@ -98,39 +90,5 @@ export function computeHereDocBodyParts(
   const lexer = new Lexer(source, word.pos, word.end, false, context);
   lexer._nestingDepth = depth;
   const parts = lexer.buildHereDocParts(word.pos, word.end);
-  if (!parts) return undefined;
-  resolveCollected(lexer);
-  return parts;
-}
-
-/**
- * Resolve each collected substitution's inner script. The script is parsed *in place*
- * against the original source over the window [innerStart, innerStart + inner.length),
- * so every node is born with absolute pos/end — no slicing, no re-basing — and nested
- * substitutions compose because deeper words re-lex the original on demand.
- *
- * Escaped backticks rebuild `inner` with the escapes removed, so it is no longer a verbatim
- * substring of the source and carries no innerStart; those parse the rebuilt slice and stay
- * relative to it — the single exception to absolute offsets. Only these scripts carry a
- * `source` property holding the decoded string their positions index.
- */
-function resolveCollected(lexer: Lexer): void {
-  const source = lexer.getSource();
-  for (const [part, innerDepth, inner, innerStart, parenBoundary] of lexer.getCollectedExpansions()) {
-    const depth = innerDepth + 1;
-    if (depth > MAX_SYNTAX_NESTING + 1) continue;
-    if (innerStart !== undefined) {
-      part.script = parseRegion(
-        source,
-        innerStart,
-        innerStart + inner.length,
-        depth,
-        parenBoundary,
-        lexer.getSubstitutionContext(),
-      );
-    } else {
-      part.script = parseRegion(inner, 0, inner.length, depth);
-      part.script.source = inner;
-    }
-  }
+  return parts ?? undefined;
 }

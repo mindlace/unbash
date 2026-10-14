@@ -1,19 +1,14 @@
 import { test } from "node:test";
 import assert from "node:assert";
-import { parse } from "../src/parser.ts";
+import { forEachChild, parse } from "../src/parser.ts";
+import type { ArithmeticCommandExpansion, Command, SyntaxNode } from "../src/types.ts";
 
 // Walk the whole AST and assert every word's span indexes the original source.
-// Accessing the lazy `parts` getter resolves nested substitutions in place, so this
-// exercises the absolute-offset invariant at every nesting depth.
-function check(source: string, value: unknown, path: string): void {
-  if (value === null || typeof value !== "object") return;
-  if (Array.isArray(value)) {
-    value.forEach((item, i) => check(source, item, `${path}[${i}]`));
-    return;
-  }
-  const node = value as Record<string, any>;
-  const isWord = typeof node.text === "string" && typeof node.pos === "number" && typeof node.end === "number";
-  if (isWord) {
+// Canonical children include lazy word parts and embedded script/expression payloads.
+function check(source: string, node: SyntaxNode, path: string, words: string[] = []): void {
+  if (node.type === "Script" && "source" in node && typeof node.source === "string") source = node.source;
+  if ("text" in node) {
+    if (node.type === "Word") words.push(node.text);
     // Every word — including parameter-expansion sub-fields — has text equal to its source
     // span. value carries the interpreted form (quotes resolved).
     assert.strictEqual(
@@ -21,12 +16,25 @@ function check(source: string, value: unknown, path: string): void {
       node.text,
       `word span mismatch at ${path} (pos=${node.pos}, end=${node.end})`,
     );
-    const parts = node.parts; // getter → lazy resolve of nested substitutions
-    if (parts) check(source, parts, `${path}.parts`);
-    return;
   }
-  for (const key of Object.keys(node)) check(source, node[key], `${path}.${key}`);
+  forEachChild(node, (child) => check(source, child, `${path}.${child.type}`, words));
 }
+
+test("span checks reach words through every nested expansion boundary", () => {
+  const source = "echo ${x:-$((1+$(inside)))} [$(bracket)] <(process)";
+  const words: string[] = [];
+  check(source, parse(source), "script", words);
+  assert.deepStrictEqual(words, [
+    "echo",
+    "${x:-$((1+$(inside)))}",
+    "$((1+$(inside)))",
+    "inside",
+    "[$(bracket)]",
+    "bracket",
+    "<(process)",
+    "process",
+  ]);
+});
 
 // NB: single-quoted — these contain ${...} which a backtick template literal would
 // interpret as JS interpolation.
@@ -111,13 +119,14 @@ test("arithmetic-command substitution offsets are absolute", () => {
   const command = `echo $(( $(id -u) + 1 ))`;
   const arith = suffixPart(command, "ArithmeticExpansion");
   // find the ArithmeticCommandExpansion node in the expression tree
-  let ace: any;
-  (function walk(n: any) {
-    if (!n || typeof n !== "object") return;
+  let ace: ArithmeticCommandExpansion | undefined;
+  (function walk(n: SyntaxNode) {
     if (n.type === "ArithmeticCommandExpansion") ace = n;
-    for (const k of Object.keys(n)) walk(n[k]);
+    forEachChild(n, walk);
   })(arith.expression);
+  assert.ok(ace?.script);
   const cmd = ace.script.commands[0].command;
+  assert.ok(cmd.type === "Command" && cmd.name);
   assert.strictEqual(command.slice(cmd.pos, cmd.end), "id -u");
   assert.strictEqual(command.slice(cmd.name.pos, cmd.name.end), "id");
 });
@@ -148,13 +157,14 @@ test("arithmetic command and for substitutions have absolute script offsets", ()
     const actual: string[] = [];
 
     for (const expression of expressions) {
-      (function walk(node: any) {
-        if (!node || typeof node !== "object") return;
+      if (!expression) continue;
+      (function walk(node: SyntaxNode) {
         if (node.type === "ArithmeticCommandExpansion") {
+          assert.ok(node.script);
           const nested = node.script.commands[0].command;
           actual.push(command.slice(nested.pos, nested.end));
         }
-        for (const value of Object.values(node)) walk(value);
+        forEachChild(node, walk);
       })(expression);
     }
 
@@ -170,15 +180,10 @@ test("command substitution inside parameter-expansion operand is absolute", () =
     ["echo ${x/foo/$(repl args)}", "repl args"],
     ["echo ${a:-${b:-$(deep cmd)}}", "deep cmd"],
   ] as const) {
-    let cmd: any;
-    (function walk(n: any) {
-      if (!n || typeof n !== "object") return;
+    let cmd: Command | undefined;
+    (function walk(n: SyntaxNode) {
       if (n.type === "Command" && n.name && command.slice(n.name.pos, n.name.end) !== "echo") cmd = n;
-      if (typeof n.text === "string" && "parts" in n) {
-        const p = n.parts;
-        if (p) walk(p);
-      }
-      for (const k of Object.keys(n)) if (k !== "parts") walk(n[k]);
+      forEachChild(n, walk);
     })(parse(command));
     assert.ok(cmd, command);
     assert.strictEqual(command.slice(cmd.pos, cmd.end), expected, command);
