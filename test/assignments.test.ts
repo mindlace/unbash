@@ -859,6 +859,58 @@ test("quoted and escaped brackets inside a subscript do not end it", () => {
   }
 });
 
+test("ANSI-C quotes keep escaped quotes and brackets inside assignment subscripts", () => {
+  for (const [source, text, value] of [
+    [String.raw`t[x $'\']' y]=1`, String.raw`x $'\']' y`, "x '] y"],
+    [String.raw`t[x $'\n' y]=1`, String.raw`x $'\n' y`, "x \n y"],
+    ["t[$'a]b' c]=1", "$'a]b' c", "a]b c"],
+    [String.raw`t[x \$']' y]=1`, String.raw`x \$']' y`, "x $] y"],
+    ["t[x $$']' y]=1", "x $$']' y", "x $$] y"],
+  ] as const) {
+    const script = parse(source);
+    assert.equal(script.errors, undefined, source);
+    const command = nodeOfType(script.commands[0].command, "Command");
+    const assignment = nodeOfType(command.prefix[0], "Assignment");
+    assert.equal(command.name, undefined, source);
+    assert.equal(assignment.index?.text, text, source);
+    assert.equal(assignment.index?.value, value, source);
+    assert.equal(assignment.index?.parts?.map((part) => part.text).join(""), text, source);
+    assert.equal(print(script), source, source);
+    assert.deepEqual(JSON.parse(JSON.stringify(parse(print(script)))), JSON.parse(JSON.stringify(script)), source);
+    assert.equal(script.errors, undefined, source);
+  }
+});
+
+test("ANSI-C quoted array keys retain their extent during lazy materialization", () => {
+  for (const source of [String.raw`a=([$'\']' x]=1)`, String.raw`declare -A a=([$'\']' x]=1)`]) {
+    for (const partsFirst of [false, true]) {
+      const script = parse(source);
+      assert.equal(script.errors, undefined, source);
+      const command = nodeOfType(script.commands[0].command, "Command");
+      const assignment = [...command.prefix, ...command.suffix].find((part) => part.type === "Assignment");
+      assert.ok(assignment?.type === "Assignment", source);
+      const array = nodeOfType(assignment.value, "ArrayValue");
+      assert.equal(array.elements.length, 1, source);
+      const word = array.elements[0];
+      if (partsFirst) void word.parts;
+      assert.equal(word.text, String.raw`[$'\']' x]=1`, source);
+      assert.equal(word.value, "['] x]=1", source);
+      assert.deepEqual(
+        word.parts?.map((part) => [part.type, part.text]),
+        [
+          ["Literal", "["],
+          ["AnsiCQuoted", String.raw`$'\']'`],
+          ["Literal", " x]=1"],
+        ],
+        source,
+      );
+      assert.equal(print(script), source, source);
+      assert.deepEqual(JSON.parse(JSON.stringify(parse(print(script)))), JSON.parse(JSON.stringify(script)), source);
+      assert.equal(script.errors, undefined, source);
+    }
+  }
+});
+
 test("a matched subscript also forms one command word without an operator", () => {
   // `a[$x y]` names a command in Bash (`a[$x y]: command not found`); only arguments split.
   const c = nodeOfType(parse("a[$x y] b").commands[0].command, "Command");

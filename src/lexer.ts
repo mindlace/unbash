@@ -853,6 +853,11 @@ export class Lexer {
       const expected = delimiters[delimiters.length - 1];
       if (ch === CH_DOLLAR && pos + 1 < this.srcEnd) {
         const after = this.src.charCodeAt(pos + 1);
+        if (after === CH_SQUOTE) {
+          pos = decodeAnsiCQuoted(this.src, pos + 2, this.srcEnd).end;
+          wordStart = false;
+          continue;
+        }
         if (after === CH_DOLLAR) {
           pos += 2; // `$$` consumes its second `$`, so a `{` after it opens nothing
           wordStart = false;
