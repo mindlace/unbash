@@ -396,6 +396,28 @@ const ASSIGNMENT_AFTER_INDEX = 2;
 const ASSIGNMENT_AFTER_PLUS = 3;
 const ASSIGNMENT_INDEX_BASE = 4;
 
+/** Join adjacent Literal parts so an element keeps one Literal per run, as word scans produce. */
+function mergeLiterals(parts: WordPart[]): WordPart[] {
+  let merged: WordPart[] | undefined;
+  for (let i = 0; i < parts.length; i++) {
+    const part = parts[i];
+    const previous = merged === undefined ? parts[i - 1] : merged[merged.length - 1];
+    if (i > 0 && part.type === "Literal" && previous.type === "Literal" && previous.end === part.pos) {
+      if (merged === undefined) merged = parts.slice(0, i);
+      merged[merged.length - 1] = {
+        type: "Literal",
+        pos: previous.pos,
+        end: part.end,
+        text: previous.text + part.text,
+        value: previous.value + part.value,
+      };
+    } else if (merged !== undefined) {
+      merged.push(part);
+    }
+  }
+  return merged ?? parts;
+}
+
 function isMatchedAssignment(state: number): boolean {
   return state < ASSIGNMENT_INVALID;
 }
@@ -1233,32 +1255,39 @@ export class Lexer {
   buildArrayElementParts(startPos: number): WordPart[] | null {
     const close = this.findClosingBracket(startPos + 1);
     if (close === -1) return this.buildWordParts(startPos);
+    const src = this.src;
     this._buildParts = true;
-    const prefix = hasEmbeddedWordStructure(this.src, startPos, close + 1)
+    const head = hasEmbeddedWordStructure(src, startPos, close + 1)
       ? this.parseSubFieldWord(startPos, close + 1, "embedded")
       : undefined;
     this.pos = close + 1;
+    this._deferGlobMarks = true;
     this.readWordText();
-    const parts = this._wordParts;
-    const prefixParts = prefix?.parts;
-    if (prefixParts) {
-      if (parts) return prefixParts.concat(parts);
-      if (this.pos > close + 1) {
-        prefixParts.push({
-          type: "Literal",
-          pos: close + 1,
-          end: this.pos,
-          text: this.src.slice(close + 1, this.pos),
-          value: this._wordText,
-        });
-      }
-      return prefixParts;
+    this._deferGlobMarks = false;
+    const end = this.pos;
+    const headText = src.slice(startPos, close + 1);
+    const headParts: WordPart[] = head?.parts ?? [
+      { type: "Literal", pos: startPos, end: close + 1, text: headText, value: head?.value ?? headText },
+    ];
+    const tailParts: WordPart[] =
+      this._wordParts ??
+      (end > close + 1
+        ? [{ type: "Literal", pos: close + 1, end, text: src.slice(close + 1, end), value: this._wordText }]
+        : []);
+    // Only `[key]=` and `[key]+=` select an element; its key is never a pattern. Any other element
+    // is a value that undergoes pathname expansion, so one glob pass owns the whole element and a
+    // leading bracket is a pattern as in a command word.
+    const operator = skipLineContinuations(src, close + 1, end);
+    const after = src.charCodeAt(operator);
+    const keyed = after === CH_EQ || (after === CH_PLUS && src.charCodeAt(operator + 1) === CH_EQ);
+    let parts: WordPart[];
+    if (keyed) {
+      parts = mergeLiterals(headParts.concat(parseGlobParts(src, close + 1, end, tailParts) ?? tailParts));
+    } else {
+      const literal = mergeLiterals(headParts.concat(tailParts));
+      parts = parseGlobParts(src, startPos, end, literal) ?? literal;
     }
-    if (parts) {
-      const text = this.src.slice(startPos, close + 1);
-      parts.unshift({ type: "Literal", pos: startPos, end: close + 1, text, value: prefix?.value ?? text });
-    }
-    return parts ?? null;
+    return parts.length > 1 || parts[0].type !== "Literal" ? parts : null;
   }
 
   /** Scan a heredoc body for expansions, building parts. Spaces/newlines are literal. */
@@ -1985,6 +2014,8 @@ export class Lexer {
   private _wordHasExpansions = false;
   private _wordKeywordEligible = false;
   private _wordIsAssignment: boolean | undefined;
+  // Set while scanning the tail of an array element, whose glob pass covers the whole element.
+  private _deferGlobMarks = false;
   private _wordAssignmentOperatorPos: number | undefined;
   _wordParts: WordPart[] | null = null;
   private _resultText = "";
@@ -2232,9 +2263,10 @@ export class Lexer {
       this._wordIsAssignment = undefined;
       this._wordAssignmentOperatorPos = undefined;
       if (this._buildParts) {
-        this._wordParts = hasGlobCharacters(this._wordText)
-          ? (parseGlobParts(src, fastStart, pos, undefined) ?? null)
-          : null;
+        this._wordParts =
+          hasGlobCharacters(this._wordText) && !this._deferGlobMarks
+            ? (parseGlobParts(src, fastStart, pos, undefined) ?? null)
+            : null;
       }
       return;
     }
@@ -2617,7 +2649,8 @@ export class Lexer {
     if (bp) {
       // Only store parts if they add structure beyond a single literal
       this._wordParts = parts!.length > 1 || (parts!.length === 1 && parts![0].type !== "Literal") ? parts! : null;
-      if (hasGlobs) this._wordParts = parseGlobParts(src, fastStart, pos, this._wordParts) ?? null;
+      if (hasGlobs && !this._deferGlobMarks)
+        this._wordParts = parseGlobParts(src, fastStart, pos, this._wordParts) ?? null;
     }
   }
 

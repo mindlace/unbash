@@ -3,7 +3,8 @@ import test from "node:test";
 import { parse } from "../src/parser.ts";
 import { print } from "../src/printer.ts";
 import { parseGlobParts } from "../src/glob.ts";
-import { nodeOfType } from "./ast-helpers.ts";
+import type { WordPart } from "../src/types.ts";
+import { arrayElements, nodeOfType } from "./ast-helpers.ts";
 
 function argument(source: string, index = 0) {
   const ast = parse(source);
@@ -128,7 +129,15 @@ test("bracket expressions recognize classes, negation and an initial close brack
         end: 5 + spelling.length,
         text: spelling,
         value,
-        parts: [{ type: "Literal", pos: 6, end: 4 + spelling.length, text: interior, value: interiorValue }],
+        parts: [
+          {
+            type: "Literal",
+            pos: 6,
+            end: 4 + spelling.length,
+            text: interior,
+            value: interiorValue,
+          },
+        ],
       },
     ]);
   }
@@ -429,4 +438,163 @@ test("matched bracket resolution grows linearly", () => {
   assert.ok(classes(4096) < classes(2048) * 2.1);
   assert.ok(openers(4096) < openers(2048) * 2.1);
   assert.ok(members(4096) < members(2048) * 2.1);
+});
+
+function elements(source: string) {
+  const ast = parse(source);
+  assert.equal(ast.errors, undefined, source);
+  const command = nodeOfType(ast.commands[0].command, "Command");
+  const words = arrayElements(nodeOfType(command.prefix[0], "Assignment"));
+  assert.ok(words, source);
+  return words;
+}
+
+test("a leading bracket expression in an array element is a glob unless it keys the element", () => {
+  // Bash reads `[...]` at the start of an element as a matched pair, but only `[key]=` and
+  // `[key]+=` select an element; any other element is a value that undergoes pathname expansion.
+  const [files] = elements("files=([^_]*.txt)");
+  assert.deepEqual(files.parts, [
+    {
+      type: "Glob",
+      kind: "bracket",
+      pos: 7,
+      end: 11,
+      text: "[^_]",
+      value: "[^_]",
+      parts: [{ type: "Literal", pos: 8, end: 10, text: "^_", value: "^_" }],
+    },
+    { type: "Glob", kind: "star", pos: 11, end: 12, text: "*", value: "*", parts: undefined },
+    { type: "Literal", pos: 12, end: 16, text: ".txt", value: ".txt" },
+  ]);
+  assert.equal(print(parse("files=([^_]*.txt)")), "files=([^_]*.txt)");
+
+  const [spaced, keyed] = elements("a=([x y]z [0]=q)");
+  assert.equal(spaced.text, "[x y]z");
+  assert.equal(spaced.value, "[x y]z");
+  assert.deepEqual(spaced.parts, [
+    {
+      type: "Glob",
+      kind: "bracket",
+      pos: 3,
+      end: 8,
+      text: "[x y]",
+      value: "[x y]",
+      parts: [{ type: "Literal", pos: 4, end: 7, text: "x y", value: "x y" }],
+    },
+    { type: "Literal", pos: 8, end: 9, text: "z", value: "z" },
+  ]);
+  assert.equal(keyed.parts, undefined);
+
+  const [whole, unkeyed, empty] = elements("a=([ab] [a]b=c []x)");
+  assert.deepEqual(
+    whole.parts?.map((part) => [part.type, part.text]),
+    [["Glob", "[ab]"]],
+  );
+  assert.deepEqual(
+    unkeyed.parts?.map((part) => [part.type, part.text]),
+    [
+      ["Glob", "[a]"],
+      ["Literal", "b=c"],
+    ],
+  );
+  assert.equal(empty.parts, undefined);
+});
+
+test("keyed array elements keep their subscript as literal text", () => {
+  const [plain, expanded, appended, bare, doubled] = elements("a=([x y]=1 [$i]+=2 [a]+=b [a]= [x]==y)");
+  assert.equal(plain.parts, undefined);
+  assert.deepEqual(
+    expanded.parts?.filter((part) => part.type !== "Literal").map((part) => [part.type, part.text]),
+    [["SimpleExpansion", "$i"]],
+  );
+  assert.equal(appended.parts, undefined);
+  assert.equal(bare.parts, undefined);
+  assert.equal(doubled.parts, undefined);
+  // A line continuation between `]` and the operator still keys the element.
+  assert.equal(
+    elements("a=([x]\\\n=1 [y]\\\n+=2)").every((word) => word.parts === undefined),
+    true,
+  );
+});
+
+test("leading bracket globs in array elements follow the matcher's extent rules", () => {
+  const texts = (source: string) =>
+    elements(source).map((word) =>
+      word.parts?.map((part) => [part.type, part.pos, part.end, part.text, "value" in part ? part.value : undefined]),
+    );
+  assert.deepEqual(texts("a=([[:alpha:]]x)"), [
+    [
+      ["Glob", 3, 14, "[[:alpha:]]", "[[:alpha:]]"],
+      ["Literal", 14, 15, "x", "x"],
+    ],
+  ]);
+  assert.deepEqual(texts(String.raw`a=([a\]b]c)`), [
+    [
+      ["Glob", 3, 9, String.raw`[a\]b]`, "[a]b]"],
+      ["Literal", 9, 10, "c", "c"],
+    ],
+  ]);
+  assert.deepEqual(texts("a=([!]]x []]x [x]+y)"), [
+    [
+      ["Glob", 3, 7, "[!]]", "[!]]"],
+      ["Literal", 7, 8, "x", "x"],
+    ],
+    [
+      ["Glob", 9, 12, "[]]", "[]]"],
+      ["Literal", 12, 13, "x", "x"],
+    ],
+    [
+      ["Glob", 14, 17, "[x]", "[x]"],
+      ["Literal", 17, 19, "+y", "+y"],
+    ],
+  ]);
+  assert.deepEqual(texts("x[1]=([a]b)"), [
+    [
+      ["Glob", 6, 9, "[a]", "[a]"],
+      ["Literal", 9, 10, "b", "b"],
+    ],
+  ]);
+  // The tokenizer's matched pair ends at the first `]`; the pattern extent does not.
+  for (const element of [
+    "[!]a[b]]",
+    "[][b]]",
+    "[][q]",
+    "[!][q]",
+    "[][[:alpha:]]]z",
+    "[]@[b]]",
+    "[][:digit:]]=v",
+    "[a$x]b",
+  ]) {
+    const [word] = elements(`a=(${element})`);
+    const argument = nodeOfType(nodeOfType(parse(`echo ${element}`).commands[0].command, "Command").suffix[0], "Word");
+    const shape = (parts: readonly WordPart[] | undefined, offset: number) =>
+      parts?.map((part) => [part.type, part.pos - offset, part.end - offset, part.text]);
+    assert.deepEqual(shape(word.parts, 3), shape(argument.parts, 5), element);
+  }
+  assert.deepEqual(texts("a=([!]a[b]] [][q])"), [
+    [
+      ["Glob", 3, 10, "[!]a[b]", "[!]a[b]"],
+      ["Literal", 10, 11, "]", "]"],
+    ],
+    [["Glob", 12, 17, "[][q]", "[][q]"]],
+  ]);
+});
+
+test("quoted and expanded members of a leading bracket glob stay its children", () => {
+  const [word] = elements('a=(["$x"]y)');
+  const bracket = word.parts?.[0];
+  assert.equal(bracket?.type, "Glob");
+  if (bracket?.type !== "Glob") return;
+  assert.deepEqual(
+    [bracket.kind, bracket.pos, bracket.end, bracket.text, bracket.value],
+    ["bracket", 3, 9, '["$x"]', "[$x]"],
+  );
+  assert.deepEqual(
+    bracket.parts?.map((part) => [part.type, part.text]),
+    [["DoubleQuoted", '"$x"']],
+  );
+  assert.deepEqual(
+    word.parts?.slice(1).map((part) => [part.type, part.text]),
+    [["Literal", "y"]],
+  );
 });
