@@ -396,26 +396,22 @@ const ASSIGNMENT_AFTER_INDEX = 2;
 const ASSIGNMENT_AFTER_PLUS = 3;
 const ASSIGNMENT_INDEX_BASE = 4;
 
-/** Join adjacent Literal parts so an element keeps one Literal per run, as word scans produce. */
-function mergeLiterals(parts: WordPart[]): WordPart[] {
-  let merged: WordPart[] | undefined;
-  for (let i = 0; i < parts.length; i++) {
-    const part = parts[i];
-    const previous = merged === undefined ? parts[i - 1] : merged[merged.length - 1];
-    if (i > 0 && part.type === "Literal" && previous.type === "Literal" && previous.end === part.pos) {
-      if (merged === undefined) merged = parts.slice(0, i);
-      merged[merged.length - 1] = {
-        type: "Literal",
-        pos: previous.pos,
-        end: part.end,
-        text: previous.text + part.text,
-        value: previous.value + part.value,
-      };
-    } else if (merged !== undefined) {
-      merged.push(part);
-    }
+function joinWordParts(head: WordPart[], tail: WordPart[]): WordPart[] {
+  const last = head[head.length - 1];
+  const first = tail[0];
+  let start = 0;
+  if (last?.type === "Literal" && first?.type === "Literal" && last.end === first.pos) {
+    head[head.length - 1] = {
+      type: "Literal",
+      pos: last.pos,
+      end: first.end,
+      text: last.text + first.text,
+      value: last.value + first.value,
+    };
+    start = 1;
   }
-  return merged ?? parts;
+  for (let i = start; i < tail.length; i++) head.push(tail[i]);
+  return head;
 }
 
 function isMatchedAssignment(state: number): boolean {
@@ -684,7 +680,11 @@ export class Lexer {
     this.srcEnd = end;
     this._buildValue = true;
     this.readWordText();
-    if (this._wordInSubscript && this.pos < this.srcEnd) {
+    if (
+      this.pos < end &&
+      this._wordAssignmentState !== undefined &&
+      this._wordAssignmentState >= ASSIGNMENT_INDEX_BASE
+    ) {
       this.pos = start;
       this.readWordText(true);
     }
@@ -702,11 +702,12 @@ export class Lexer {
     // A failed search scans to the end and every unclosed subscript at a command position
     // retries it, so answer from the last bracket in the window first.
     const limit = Math.min(end, this.srcEnd);
-    if (limit !== this._lastBracketLimit) {
-      this._lastBracketLimit = limit;
-      this._lastBracket = this.src.lastIndexOf("]", limit - 1);
+    let window = this._bracketWindow;
+    if (!window || window.limit !== limit) {
+      window = { limit, last: this.src.lastIndexOf("]", limit - 1) };
+      this._bracketWindow = window;
     }
-    if (start > this._lastBracket) return -1;
+    if (start > window.last) return -1;
     return this.findClosingShellDelimiter(start, end, CH_RBRACKET);
   }
 
@@ -1259,7 +1260,11 @@ export class Lexer {
       this.readWordText();
       // A command word whose subscript holds a blank was bounded by the matched-pair rescan, so
       // its parts need the same scan.
-      if (this._wordInSubscript && this.pos < this.srcEnd) {
+      if (
+        this.pos < this.srcEnd &&
+        this._wordAssignmentState !== undefined &&
+        this._wordAssignmentState >= ASSIGNMENT_INDEX_BASE
+      ) {
         this.pos = startPos;
         this.readWordText(true);
       }
@@ -1284,32 +1289,29 @@ export class Lexer {
       ? this.parseSubFieldWord(startPos, close + 1, "embedded")
       : undefined;
     this.pos = close + 1;
-    this._deferGlobMarks = true;
-    this.readWordText();
-    this._deferGlobMarks = false;
+    this.readWordText(false, LexContext.ArrayElement);
     const end = this.pos;
-    const headText = src.slice(startPos, close + 1);
-    const headParts: WordPart[] = head?.parts ?? [
-      { type: "Literal", pos: startPos, end: close + 1, text: headText, value: head?.value ?? headText },
-    ];
-    const tailParts: WordPart[] =
-      this._wordParts ??
-      (end > close + 1
-        ? [{ type: "Literal", pos: close + 1, end, text: src.slice(close + 1, end), value: this._wordText }]
-        : []);
     // Only `[key]=` and `[key]+=` select an element; its key is never a pattern. Any other element
     // is a value that undergoes pathname expansion, so one glob pass owns the whole element and a
     // leading bracket is a pattern as in a command word.
     const operator = skipLineContinuations(src, close + 1, end);
     const after = src.charCodeAt(operator);
     const keyed = after === CH_EQ || (after === CH_PLUS && src.charCodeAt(operator + 1) === CH_EQ);
-    let parts: WordPart[];
-    if (keyed) {
-      parts = mergeLiterals(headParts.concat(parseGlobParts(src, close + 1, end, tailParts) ?? tailParts));
-    } else {
-      const literal = mergeLiterals(headParts.concat(tailParts));
-      parts = parseGlobParts(src, startPos, end, literal) ?? literal;
-    }
+    let headParts = head?.parts;
+    let tailParts = this._wordParts;
+    if (keyed) tailParts = parseGlobParts(src, close + 1, end, tailParts) ?? tailParts;
+    if (!headParts && !tailParts) return keyed ? null : (parseGlobParts(src, startPos, end, undefined) ?? null);
+
+    const headText = src.slice(startPos, close + 1);
+    if (!headParts)
+      headParts = [{ type: "Literal", pos: startPos, end: close + 1, text: headText, value: head?.value ?? headText }];
+    if (!tailParts)
+      tailParts =
+        end > close + 1
+          ? [{ type: "Literal", pos: close + 1, end, text: src.slice(close + 1, end), value: this._wordText }]
+          : [];
+    let parts = joinWordParts(headParts, tailParts);
+    if (!keyed) parts = parseGlobParts(src, startPos, end, parts) ?? parts;
     return parts.length > 1 || parts[0].type !== "Literal" ? parts : null;
   }
 
@@ -2036,16 +2038,8 @@ export class Lexer {
   private _wordQuoted = false;
   private _wordHasExpansions = false;
   private _wordKeywordEligible = false;
-  private _wordIsAssignment: boolean | undefined;
-  // Set while scanning the tail of an array element, whose glob pass covers the whole element.
-  private _deferGlobMarks = false;
-  // The last word scan stopped inside an unclosed array subscript.
-  private _wordInSubscript = false;
-  // Error count before the last word scan, so a rescan can replace its diagnostics.
-  private _wordErrorStart = 0;
-  private _lastBracketLimit = -1;
-  private _lastBracket = -1;
-  private _wordAssignmentOperatorPos: number | undefined;
+  private _wordAssignmentState: number | undefined;
+  private _bracketWindow: { limit: number; last: number } | undefined;
   _wordParts: WordPart[] | null = null;
   private _resultText = "";
   // True when the last $-construct's value is exactly its raw source span.
@@ -2068,6 +2062,7 @@ export class Lexer {
   private _hereQuoted = false;
 
   private readWord(out: TokenValue, ctx: LexContext, tokenStart: number = 0): void {
+    const errorStart = this._errors === null ? 0 : this._errors.length;
     this.readWordText(false, ctx, true);
     if (ctx === LexContext.Normal) {
       const next = this.pos < this.srcEnd ? this.src.charCodeAt(this.pos) : 0;
@@ -2077,7 +2072,7 @@ export class Lexer {
         return;
       }
     }
-    this.classifyWord(out, ctx, tokenStart);
+    this.classifyWord(out, ctx, tokenStart, errorStart);
   }
 
   private isRedirectVariable(start: number, end: number): boolean {
@@ -2103,15 +2098,13 @@ export class Lexer {
     return true;
   }
 
-  private classifyWord(out: TokenValue, ctx: LexContext, tokenStart: number): void {
+  private classifyWord(out: TokenValue, ctx: LexContext, tokenStart: number, errorStart: number): void {
     const src = this.src;
     const raw = this._wordRaw;
     const hasExpansions = this._wordHasExpansions;
     const quoted = this._wordQuoted;
     const keywordEligible = this._wordKeywordEligible;
-    const isAssignment = this._wordIsAssignment;
-    let assignmentOpPos = this._wordAssignmentOperatorPos;
-    const errorStart = this._wordErrorStart;
+    let assignmentState = this._wordAssignmentState;
     const wordEnd = this.pos;
     const wordLen = wordEnd - tokenStart;
 
@@ -2170,7 +2163,7 @@ export class Lexer {
       }
     }
     if (ctx === LexContext.CommandStart || ctx === LexContext.CommandPrefix || ctx === LexContext.Declaration) {
-      if (isAssignment === undefined) {
+      if (assignmentState === undefined) {
         // Fast-path word (value === raw span): detect assignment positionally.
         let eq = -1;
         let bracket = false;
@@ -2182,38 +2175,31 @@ export class Lexer {
           }
           if (c === CH_LBRACKET) bracket = true;
         }
-        if (eq !== -1) {
-          const state = scanAssignmentPrefix(src, tokenStart, wordEnd, ASSIGNMENT_NAME_START);
-          if (isMatchedAssignment(state)) assignmentOpPos = assignmentOperatorPos(state);
-        } else if (
-          ctx !== LexContext.Declaration &&
-          bracket &&
-          wordEnd < this.srcEnd &&
-          scanAssignmentPrefix(src, tokenStart, wordEnd, ASSIGNMENT_NAME_START) >= ASSIGNMENT_INDEX_BASE
-        ) {
-          this.pos = tokenStart;
-          this.readWordText(true);
-          if (this.pos > wordEnd) {
-            this.classifyWord(out, ctx, tokenStart);
-            return;
-          }
-        }
-      } else if (ctx !== LexContext.Declaration && this._wordInSubscript && wordEnd < this.srcEnd) {
-        // A quoted or expanded word that stopped inside its subscript: Bash reads on to the
-        // matching bracket there. The rescan repeats the word's own diagnostics, so drop them.
-        if (this._errors !== null) this._errors.length = errorStart;
-        this.pos = tokenStart;
-        this.readWordText(true);
-        if (this.pos > wordEnd) {
-          this.classifyWord(out, ctx, tokenStart);
-          return;
+        if (eq !== -1 || (ctx !== LexContext.Declaration && bracket)) {
+          assignmentState = scanAssignmentPrefix(src, tokenStart, wordEnd, ASSIGNMENT_NAME_START);
         }
       }
-      if (assignmentOpPos !== undefined) {
-        setSpanToken(out, Token.Assignment, tokenStart, wordEnd, raw);
-        if (value !== null) out._value = value;
-        out.assignmentOperatorPos = assignmentOpPos;
-        return;
+      if (assignmentState !== undefined) {
+        if (ctx !== LexContext.Declaration && assignmentState >= ASSIGNMENT_INDEX_BASE) {
+          if (wordEnd < this.srcEnd) {
+            if (this._errors !== null) this._errors.length = errorStart;
+            this.pos = tokenStart;
+            this.readWordText(true, ctx, true);
+            if (this.pos > wordEnd) {
+              this.classifyWord(out, ctx, tokenStart, errorStart);
+              return;
+            }
+          }
+          if (this._errors === null || this._errors.length === errorStart) {
+            this.errors.push({ message: "unterminated array subscript", pos: src.indexOf("[", tokenStart) });
+          }
+        }
+        if (isMatchedAssignment(assignmentState)) {
+          setSpanToken(out, Token.Assignment, tokenStart, wordEnd, raw);
+          if (value !== null) out._value = value;
+          out.assignmentOperatorPos = assignmentOperatorPos(assignmentState);
+          return;
+        }
       }
     }
     // `]]` is reserved only where it can close a `[[`; operands and wordlist entries, which
@@ -2276,7 +2262,6 @@ export class Lexer {
     const src = this.src;
     const len = this.srcEnd;
     let pos = this.pos;
-    this._wordErrorStart = this._errors === null ? 0 : this._errors.length;
 
     // Fast path: scan a single run of plain chars (covers most words)
     const fastStart = pos;
@@ -2301,12 +2286,10 @@ export class Lexer {
       this._wordQuoted = false;
       this._wordHasExpansions = false;
       this._wordKeywordEligible = true;
-      this._wordIsAssignment = undefined;
-      this._wordAssignmentOperatorPos = undefined;
-      this._wordInSubscript = false;
+      this._wordAssignmentState = undefined;
       if (this._buildParts) {
         this._wordParts =
-          hasGlobCharacters(this._wordText) && !this._deferGlobMarks
+          hasGlobCharacters(this._wordText) && ctx !== LexContext.ArrayElement
             ? (parseGlobParts(src, fastStart, pos, undefined) ?? null)
             : null;
       }
@@ -2362,8 +2345,34 @@ export class Lexer {
       }
 
       if (charType[ch] & 1) {
+        if (subscripts && assignmentState >= ASSIGNMENT_INDEX_BASE) {
+          const close = this.findClosingBracket(pos);
+          if (close !== -1) {
+            const spanEnd = close + 1;
+            // The scanner matched the innermost open bracket past quotes, escapes and nested
+            // substitutions, so the jump closes exactly one subscript level.
+            assignmentState =
+              assignmentState === ASSIGNMENT_INDEX_BASE + 1 ? ASSIGNMENT_AFTER_INDEX : assignmentState - 1;
+            lastValueChar = src.charCodeAt(close);
+            if (bt) {
+              const chunk = src.slice(pos, spanEnd);
+              text += chunk;
+              if (bp) {
+                litBuf += chunk;
+                hasGlobs = hasGlobs || hasGlobCharacters(chunk);
+              }
+            }
+            pos = spanEnd;
+            continue;
+          }
+        }
         if (ch === CH_LPAREN && lastValueChar < 128 && extglobPrefix[lastValueChar]) {
-          if (ctx === LexContext.FunctionName) break;
+          if (
+            ctx === LexContext.FunctionName ||
+            (assignmentState >= ASSIGNMENT_INDEX_BASE &&
+              (ctx === LexContext.CommandStart || ctx === LexContext.CommandPrefix))
+          )
+            break;
           // Default Bash command syntax takes precedence over the extglob extension.
           if (
             ctx === LexContext.CommandStart &&
@@ -2391,6 +2400,7 @@ export class Lexer {
             break;
           const innerStart = pos + 1;
           const close = this.findClosingShellDelimiter(innerStart, len, CH_RPAREN, prefixChar === CH_EQ);
+          if (close === -1 && !scanning && !subscripts && assignmentState >= ASSIGNMENT_INDEX_BASE) break;
           if (
             ctx === LexContext.CommandStart &&
             prefixChar !== CH_EQ &&
@@ -2443,27 +2453,7 @@ export class Lexer {
           }
           continue;
         }
-        if (subscripts && assignmentState >= ASSIGNMENT_INDEX_BASE) {
-          const close = this.findClosingBracket(pos);
-          if (close !== -1) {
-            const spanEnd = close + 1;
-            // The scanner matched the innermost open bracket past quotes, escapes and nested
-            // substitutions, so the jump closes exactly one subscript level.
-            assignmentState =
-              assignmentState === ASSIGNMENT_INDEX_BASE + 1 ? ASSIGNMENT_AFTER_INDEX : assignmentState - 1;
-            lastValueChar = src.charCodeAt(close);
-            if (bt) {
-              const chunk = src.slice(pos, spanEnd);
-              text += chunk;
-              if (bp) {
-                litBuf += chunk;
-                hasGlobs = hasGlobs || hasGlobCharacters(chunk);
-              }
-            }
-            pos = spanEnd;
-            continue;
-          }
-        }
+
         break;
       }
 
@@ -2689,13 +2679,11 @@ export class Lexer {
     this._wordQuoted = quoted;
     this._wordHasExpansions = hasExpansions;
     this._wordKeywordEligible = keywordEligible;
-    this._wordIsAssignment = isMatchedAssignment(assignmentState);
-    this._wordAssignmentOperatorPos = this._wordIsAssignment ? assignmentOperatorPos(assignmentState) : undefined;
-    this._wordInSubscript = assignmentState >= ASSIGNMENT_INDEX_BASE;
+    this._wordAssignmentState = assignmentState;
     if (bp) {
       // Only store parts if they add structure beyond a single literal
       this._wordParts = parts!.length > 1 || (parts!.length === 1 && parts![0].type !== "Literal") ? parts! : null;
-      if (hasGlobs && !this._deferGlobMarks)
+      if (hasGlobs && ctx !== LexContext.ArrayElement)
         this._wordParts = parseGlobParts(src, fastStart, pos, this._wordParts) ?? null;
     }
   }

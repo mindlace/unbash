@@ -940,6 +940,94 @@ test("a matched subscript also forms one command word without an operator", () =
   assert.deepEqual([fn.name.text, fn.name.value], ["a[$x y]", "a[$x y]"]);
 });
 
+test("extglob prefixes inside an assignment subscript do not consume following commands", () => {
+  for (const operator of ["?", "*", "+", "@", "!"]) {
+    for (const prefix of ["", "x=1 ", ">/dev/null "]) {
+      const source = `${prefix}a[${operator}(x]=1; echo hi`;
+      const script = parse(source);
+      assert.equal(script.errors, undefined, source);
+      assert.equal(script.commands.length, 2, source);
+      const command = nodeOfType(script.commands[0].command, "Command");
+      const assignment = command.prefix.find((part) => part.type === "Assignment" && part.name === "a");
+      assert.ok(assignment?.type === "Assignment", source);
+      assert.equal(assignment.index?.text, `${operator}(x`, source);
+      assert.equal(assignment.index?.value, `${operator}(x`, source);
+      assert.equal(assignment.index?.parts, undefined, source);
+      const following = nodeOfType(script.commands[1].command, "Command");
+      assert.equal(following.name?.text, "echo", source);
+      assert.deepEqual(
+        following.suffix.map((part) => nodeOfType(part, "Word").text),
+        ["hi"],
+        source,
+      );
+      assert.equal(print(parse(print(script))), print(script), source);
+    }
+  }
+
+  const script = parse('x=1 t[?(\"]\"]+=1 echo hi');
+  assert.equal(script.errors, undefined);
+  assert.equal(script.commands.length, 1);
+  const command = nodeOfType(script.commands[0].command, "Command");
+  assert.equal(command.name?.text, "echo");
+  const assignment = nodeOfType(command.prefix[1], "Assignment");
+  assert.equal(assignment.index?.text, '?(\"]\"');
+  assert.equal(assignment.append, true);
+  assert.deepEqual(
+    command.suffix.map((part) => nodeOfType(part, "Word").text),
+    ["hi"],
+  );
+
+  for (const source of ["echo a[?(x)]=1 tail", "declare -A a[?(x)]=1", "a=([?(x]=1)"]) {
+    const control = parse(source);
+    assert.equal(control.errors, undefined, source);
+    assert.equal(print(control), source, source);
+    assert.deepEqual(JSON.parse(JSON.stringify(parse(print(control)))), JSON.parse(JSON.stringify(control)), source);
+  }
+  assert.ok(parse("echo a[?(x]=1").errors?.length);
+});
+
+test("subscript command words preserve quoted and extglob suffixes when materialized", () => {
+  const quoted = parse('a[?(x]"y"');
+  assert.equal(quoted.errors, undefined);
+  const name = nodeOfType(quoted.commands[0].command, "Command").name;
+  assert.equal(name?.text, 'a[?(x]"y"');
+  assert.equal(name?.value, "a[?(x]y");
+  assert.deepEqual(
+    name?.parts?.map((part) => [part.type, part.text]),
+    [
+      ["Literal", "a"],
+      ["Glob", "[?(x]"],
+      ["DoubleQuoted", '"y"'],
+    ],
+  );
+
+  const script = parse("a[?(x]b*(y)");
+  assert.equal(script.errors, undefined);
+  const expanded = nodeOfType(script.commands[0].command, "Command").name;
+  assert.deepEqual(
+    expanded?.parts?.map((part) => [part.type, part.text]),
+    [
+      ["Literal", "a"],
+      ["Glob", "[?(x]"],
+      ["Literal", "b"],
+      ["ExtendedGlob", "*(y)"],
+    ],
+  );
+  assert.equal(expanded?.value, "a[?(x]b*(y)");
+
+  const control = parse("echo a[?(x])");
+  assert.equal(control.errors, undefined);
+  const word = nodeOfType(nodeOfType(control.commands[0].command, "Command").suffix[0], "Word");
+  assert.equal(word.value, "a[?(x])");
+  assert.deepEqual(
+    word.parts?.map((part) => [part.type, part.text]),
+    [
+      ["Literal", "a["],
+      ["ExtendedGlob", "?(x])"],
+    ],
+  );
+});
+
 test("the matched pair applies at every command position but not to arguments", () => {
   const indexOf = (command: Command) => {
     const assignment = command.prefix.find((p) => p.type === "Assignment" && p.name === "a");
@@ -1007,5 +1095,51 @@ test("an unclosed subscript after an expansion neither swallows the script nor r
   // Without a closing bracket anywhere, each line stays its own command.
   const lines = parse("a[$x y\n".repeat(2000));
   assert.equal(lines.commands.length, 2000);
-  assert.equal(lines.errors, undefined);
+  assert.equal(lines.errors?.length, 2000);
+  assert.deepEqual(lines.errors?.[0], { message: "unterminated array subscript", pos: 1 });
+  assert.deepEqual(lines.errors?.[1999], { message: "unterminated array subscript", pos: 13994 });
+});
+
+test("unclosed command-position subscripts report eager diagnostics", () => {
+  for (const [source, pos] of [
+    ["a[[]=1", 1],
+    ["a[x[y]=1", 1],
+    ["a[[x]=1", 1],
+    ["a[$x[]=1", 1],
+    ["a[x", 1],
+    ["a[$x y\nb[z w]=1", 1],
+    ["a[[]=1 foo", 1],
+    ["a\\\n[x", 3],
+    ["x=1 a[x", 5],
+  ] as const) {
+    const script = parse(source);
+    const expected = [{ message: "unterminated array subscript", pos }];
+    assert.deepEqual(script.errors, expected, source);
+    const before = JSON.stringify(script.errors);
+    JSON.stringify(script);
+    print(script);
+    assert.equal(JSON.stringify(script.errors), before, source);
+  }
+
+  for (const [source, index] of [
+    ["a[x[y]z]=1", "x[y]z"],
+    ['a["["[x]]=1', '"["[x]'],
+    ["a[x=y z]=1", "x=y z"],
+  ] as const) {
+    const script = parse(source);
+    assert.equal(script.errors, undefined, source);
+    const assignment = nodeOfType(nodeOfType(script.commands[0].command, "Command").prefix[0], "Assignment");
+    assert.equal(assignment.index?.text, index, source);
+    assert.equal(nodeOfType(assignment.value, "Word").text, "1", source);
+  }
+  for (const source of ["echo a[x", "declare a[x"]) assert.equal(parse(source).errors, undefined, source);
+});
+
+test("subscript rescans preserve array-opening eligibility", () => {
+  for (const [source, pos] of [
+    ["a[x y]z=(1 2)", 12],
+    ["a[$x y]z=(1 2)", 13],
+  ] as const) {
+    assert.deepEqual(parse(source).errors?.[0], { message: "unexpected token ')'", pos }, source);
+  }
 });

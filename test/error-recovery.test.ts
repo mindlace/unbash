@@ -5,6 +5,28 @@ import { parse } from "../src/parser.ts";
 
 // ── Error recovery ──────────────────────────────────────────────────
 
+test("an unclosed subscript preserves later assignments across recovery boundaries", () => {
+  for (const [source, index] of [
+    ["a[$x y\nb[z w]=1", "z w"],
+    ['a[$x y # "\nb[$x z]=1\n# "', "$x z"],
+  ] as const) {
+    const script = parse(source);
+    assert.deepEqual(script.errors, [{ message: "unterminated array subscript", pos: 1 }], source);
+    assert.equal(script.commands.length, 2, source);
+    const first = nodeOfType(script.commands[0].command, "Command");
+    assert.equal(first.name?.text, "a[$x", source);
+    assert.deepEqual(
+      first.suffix.map((part) => nodeOfType(part, "Word").text),
+      ["y"],
+      source,
+    );
+    const next = nodeOfType(script.commands[1].command, "Command");
+    const assignment = nodeOfType(next.prefix[0], "Assignment");
+    assert.equal(assignment.name, "b", source);
+    assert.equal(assignment.index?.text, index, source);
+  }
+});
+
 test("unclosed single quote doesn't throw", () => {
   const ast = parse("echo 'unterminated");
   assert.equal(ast.type, "Script");
