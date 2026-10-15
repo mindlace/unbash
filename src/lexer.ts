@@ -3963,7 +3963,14 @@ export class Lexer {
         const result = bt ? src.slice(start, this.pos) : "";
         this.pos++;
         return result;
-      } else if (c === CH_LPAREN || c === CH_BACKSLASH || c === CH_SQUOTE || c === CH_DQUOTE || c === CH_BACKTICK) {
+      } else if (
+        c === CH_LPAREN ||
+        c === CH_BACKSLASH ||
+        c === CH_SQUOTE ||
+        c === CH_DQUOTE ||
+        c === CH_BACKTICK ||
+        (c === CH_DOLLAR && (src.charCodeAt(this.pos + 1) === CH_SQUOTE || src.charCodeAt(this.pos + 1) === CH_DOLLAR))
+      ) {
         break;
       } else if (c === CH_LT && this.pos + 1 < len && src.charCodeAt(this.pos + 1) === CH_LT) {
         break;
@@ -4251,6 +4258,15 @@ export class Lexer {
           this.pos++;
         }
         escapedEnd = this.pos;
+      } else if (ch === CH_DOLLAR) {
+        const next = src.charCodeAt(++this.pos);
+        if (next === CH_SQUOTE) {
+          this.pos++;
+          this.skipAnsiCQuoted();
+        } else if (next === CH_DOLLAR) {
+          this.pos++;
+        }
+        wordStart = false;
       } else if (ch === CH_SQUOTE) {
         this.pos++;
         this.skipSQ();

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { spawnSync } from "node:child_process";
 import { parse } from "../src/parser.ts";
+import { print } from "../src/printer.ts";
 import { nodeOfType } from "./ast-helpers.ts";
 import { verify } from "./verify.ts";
 
@@ -21,6 +22,104 @@ function characterReads(source: string): number {
   }
   return count;
 }
+
+test("ANSI-C quotes preserve command and process substitution boundaries (#15)", () => {
+  for (const [word, value] of [
+    [String.raw`$'\''`, "'"],
+    [String.raw`$'\')\''`, "')'"],
+    [String.raw`$'\c\''`, "\x1c'"],
+    [String.raw`$'\\'`, "\\"],
+    [String.raw`$'a'`, "a"],
+    [String.raw`$$$'\''`, "$$'"],
+  ]) {
+    for (const [open, close] of [
+      ["$(", ")"],
+      ['"$(', ')"'],
+      ["<(", ")"],
+      [">(", ")"],
+    ]) {
+      const source = `echo ${open}echo ${word}${close}; X`;
+      const ast = parse(source);
+      assert.equal(ast.errors, undefined, source);
+      assert.equal(ast.commands.length, 2, source);
+      assert.equal(nodeOfType(ast.commands[1].command, "Command").name?.text, "X", source);
+      const argument = nodeOfType(nodeOfType(ast.commands[0].command, "Command").args[0], "Word");
+      const first = argument.parts?.[0];
+      const expansion = nodeOfType(
+        first?.type === "DoubleQuoted" ? first.parts[0] : first,
+        "CommandExpansion",
+        "ProcessSubstitution",
+      );
+      const inner = expansion.script!;
+      assert.equal(inner.errors, undefined, source);
+      assert.equal(inner.commands.length, 1, source);
+      const quoted = nodeOfType(nodeOfType(inner.commands[0].command, "Command").args[0], "Word");
+      assert.equal(quoted.text, word, source);
+      assert.equal(quoted.value, value, source);
+      assert.equal(verify(source, ast), source);
+      assert.equal(print(ast), `echo ${open}echo ${word}${close}\nX`);
+    }
+  }
+});
+
+test("literal and consumed dollars do not open ANSI-C quotes in substitutions", () => {
+  for (const [word, value] of [
+    [String.raw`'\'`, "\\"],
+    [String.raw`\$'\'`, "$\\"],
+    [String.raw`$$'\'`, "$$\\"],
+    [String.raw`$$$$'\'`, "$$$$\\"],
+    [String.raw`"$'\'"`, "$'\\'"],
+  ]) {
+    for (const [open, close] of [
+      ["$(", ")"],
+      ['"$(', ')"'],
+    ]) {
+      const source = `echo ${open}echo ${word}${close}; X`;
+      const ast = parse(source);
+      assert.equal(ast.errors, undefined, source);
+      assert.equal(ast.commands.length, 2, source);
+      const first = nodeOfType(nodeOfType(ast.commands[0].command, "Command").args[0], "Word").parts?.[0];
+      const expansion = nodeOfType(first?.type === "DoubleQuoted" ? first.parts[0] : first, "CommandExpansion");
+      assert.equal(expansion.script?.errors, undefined, source);
+      const inner = nodeOfType(expansion.script!.commands[0].command, "Command");
+      assert.equal(inner.args[0].text, word, source);
+      assert.equal(inner.args[0].value, value, source);
+      assert.equal(verify(source, ast), source);
+      assert.equal(print(ast), `echo ${open}echo ${word}${close}\nX`);
+    }
+  }
+});
+
+test("nested quoted substitutions resume after an ANSI-C quote", () => {
+  const source = String.raw`echo "$(echo "$(echo $'\'')")"; X`;
+  const ast = parse(source);
+  assert.equal(ast.errors, undefined);
+  assert.equal(ast.commands.length, 2);
+  assert.equal(nodeOfType(ast.commands[1].command, "Command").name?.text, "X");
+  let script = ast;
+  for (let depth = 0; depth < 2; depth++) {
+    const word = nodeOfType(nodeOfType(script.commands[0].command, "Command").args[0], "Word");
+    const quoted = nodeOfType(word.parts?.[0], "DoubleQuoted");
+    script = nodeOfType(quoted.parts[0], "CommandExpansion").script!;
+    assert.equal(script.errors, undefined);
+    assert.equal(script.commands.length, 1);
+  }
+  assert.equal(nodeOfType(script.commands[0].command, "Command").args[0].value, "'");
+  assert.equal(verify(source, ast), source);
+  assert.equal(print(ast), String.raw`echo "$(echo "$(echo $'\'')")"` + "\nX");
+});
+
+test("unfinished ANSI-C quotes inside substitutions retain diagnostics", () => {
+  assert.deepEqual(parse("echo $(echo $'abc").errors, [
+    { message: "unterminated command substitution", pos: 5 },
+    { message: "unterminated ANSI-C quote", pos: 13 },
+  ]);
+  assert.deepEqual(parse("echo \"$(echo $'abc").errors, [
+    { message: "unterminated double quote", pos: 5 },
+    { message: "unterminated command substitution", pos: 6 },
+    { message: "unterminated ANSI-C quote", pos: 14 },
+  ]);
+});
 
 test("a comment after a negated subshell does not close the command substitution", () => {
   const source = "echo $(!(echo inside)# )\necho after)";
