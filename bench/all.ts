@@ -1,105 +1,65 @@
-import { join, resolve } from "node:path";
-import { pathToFileURL } from "node:url";
-import { parseArgs } from "node:util";
-import { bench, group, run, summary } from "mitata";
-import { short, advanced, installers, large } from "./fixtures.ts";
+import { spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
+import type { Mode, ParserSpec } from "./parsers.ts";
+import type { Measurement, WorkerOptions } from "./worker.ts";
 
-type ParseFn = (s: string) => unknown;
-type Parser = { name: string; parse: ParseFn; limited?: boolean };
+// Shared-process runs showed import-order bias and interference from sh-syntax's Go/WASM runtime.
+// Keep each parser/workload in a fresh process; Tinybench handles measurement and table formatting.
+export const parsers: ParserSpec[] = [
+  { kind: "unbash", name: "unbash", entry: fileURLToPath(new URL("../dist/parser.js", import.meta.url)) },
+  { kind: "tree-sitter-bash-native", name: "tree-sitter-bash (native)" },
+  { kind: "tree-sitter-bash-wasm", name: "tree-sitter-bash (WASM)" },
+  { kind: "sh-syntax", name: "sh-syntax" },
+  { kind: "bash-parser", name: "bash-parser" },
+  { kind: "eric-bash-parser", name: "@ericcornelissen/bash-parser" },
+];
 
-const { values } = parseArgs({
-  options: {
-    parser: { type: "string" },
-    name: { type: "string", default: "unbash" },
-    json: { type: "boolean", default: false },
-    filter: { type: "string" },
-  },
-});
-const entry = values.parser ? pathToFileURL(resolve(values.parser)) : new URL("../src/parser.ts", import.meta.url);
-const { parse }: { parse: ParseFn } = await import(entry.href);
-
-const parsers: Parser[] = [];
-
-try {
-  // @ts-ignore — CJS default export
-  const bashParser = (await import("bash-parser")).default;
-  parsers.push({ name: "bash-parser", parse: bashParser, limited: true });
-} catch {
-  console.warn("Error adding bash-parser");
-}
-
-try {
-  // @ts-ignore — CJS default export
-  const ecBashParser = (await import("@ericcornelissen/bash-parser")).default;
-  parsers.push({ name: "@ericcornelissen/bash-parser", parse: ecBashParser, limited: true });
-} catch {
-  console.warn("Error adding @ericcornelissen/bash-parser");
-}
-
-try {
-  // @ts-ignore
-  const NativeParser = (await import("tree-sitter")).default;
-  const tsbNative = new NativeParser();
-  tsbNative.setLanguage((await import("tree-sitter-bash")).default as never);
-  parsers.push({ name: "tree-sitter (native)", parse: tsbNative.parse.bind(tsbNative) });
-} catch {
-  console.warn("Error adding tree-sitter-bash");
-}
-
-try {
-  // @ts-ignore
-  const { Language, Parser: WasmParser } = await import("web-tree-sitter");
-  await WasmParser.init();
-  const lang = await Language.load(join(import.meta.dirname, "../node_modules/tree-sitter-bash/tree-sitter-bash.wasm"));
-  const tsbWasm = new WasmParser();
-  tsbWasm.setLanguage(lang);
-  parsers.push({ name: "tree-sitter (WASM)", parse: tsbWasm.parse.bind(tsbWasm) });
-} catch {
-  console.warn("Error adding tree-sitter-bash.wasm");
-}
-
-type AsyncParser = { name: string; parse: (s: string) => Promise<unknown> };
-const asyncParsers: AsyncParser[] = [];
-
-try {
-  const { parse: shSyntaxParse } = await import("sh-syntax");
-  await shSyntaxParse("echo hello"); // warm up WASM
-  asyncParsers.push({ name: "sh-syntax", parse: shSyntaxParse });
-} catch {
-  console.warn("Error adding sh-syntax");
-}
-
-for (const [label, scripts] of [
-  ["short", short],
-  ["advanced", advanced],
-  ["medium", installers],
-  ["large", large],
-] as const) {
-  group(label, () => {
-    summary(() => {
-      bench(values.name, () => {
-        for (const script of scripts) parse(script);
-      }).baseline();
-
-      for (const parser of parsers) {
-        if (/advanced|medium|large/.test(label) && parser.name.includes("bash-parser")) continue;
-
-        bench(parser.name, () => {
-          for (const script of scripts) parser.parse(script);
-        });
+export function run({
+  parsers: selected = parsers,
+  groups = ["short", "advanced", "medium", "large"],
+  mode = "parse",
+  rounds = 1,
+  timing = {},
+  timeout = 60_000,
+}: {
+  parsers?: ParserSpec[];
+  groups?: string[];
+  mode?: Mode;
+  rounds?: number;
+  timing?: WorkerOptions["timing"];
+  timeout?: number;
+} = {}) {
+  const cases = groups.flatMap((group) =>
+    selected
+      .filter(
+        (parser) =>
+          (mode === "parse" || parser.kind === "unbash") &&
+          (group === "short" || (parser.kind !== "bash-parser" && parser.kind !== "eric-bash-parser")),
+      )
+      .map((parser) => ({ parser, group, mode, timing })),
+  );
+  const results = [];
+  const worker = fileURLToPath(new URL("./worker.ts", import.meta.url));
+  for (let round = 1; round <= rounds; round++) {
+    for (const options of round % 2 ? cases : cases.toReversed()) {
+      const child = spawnSync(process.execPath, ["--expose-gc", worker, JSON.stringify(options)], {
+        encoding: "utf8",
+        timeout,
+        killSignal: "SIGKILL",
+      });
+      if (child.error || child.status !== 0) {
+        throw new Error(
+          `${options.parser.name}/${options.group}: ${child.error?.message || child.stderr || child.signal}`,
+        );
       }
-
-      for (const parser of asyncParsers) {
-        bench(parser.name, async () => {
-          for (const script of scripts) await parser.parse(script);
-        });
-      }
-    });
-  });
+      const result: Measurement = JSON.parse(child.stdout);
+      results.push({ round, ...result });
+    }
+  }
+  return results;
 }
 
-await run({
-  format: values.json ? { json: { debug: false, samples: false } } : "mitata",
-  filter: new RegExp(values.filter ?? ".*"),
-  throw: true,
-});
+if (import.meta.main) {
+  if (process.argv.length > 2) throw new Error("Edit the configuration in bench/all.ts instead of passing CLI flags");
+  console.table(run().map(({ round, row }) => ({ Round: round, ...row })));
+}

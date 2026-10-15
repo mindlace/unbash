@@ -68,6 +68,7 @@ export const large = readDir("large", ".sh");
 
 export const specialized: [string, string[]][] = [
   ["word-parts", [readFixture("word-parts.sh")]],
+  ["globs", [readFixture("globs.sh")]],
   ["param-expansion", [readFixture("param-expansion.sh")]],
   ["arithmetic", [readFixture("arithmetic.sh")]],
   ["test-expressions", [readFixture("test-expressions.sh")]],
@@ -75,3 +76,11 @@ export const specialized: [string, string[]][] = [
   ["assignments", [readFixture("assignments.sh")]],
   ["dedicated-nodes", [readFixture("dedicated-nodes.sh")]],
 ];
+
+export const workloads = new Map([
+  ["short", short],
+  ["advanced", advanced],
+  ["medium", installers],
+  ["large", large],
+  ...specialized,
+]);

@@ -23,6 +23,6 @@
     "types": ["node"],
     "verbatimModuleSyntax": true
   },
-  "include": ["./src/**/*.ts", "./test/**/*.ts", "./test/public-types.mts"],
+  "include": ["./src/**/*.ts", "./test/**/*.ts", "./test/public-types.mts", "./bench/**/*.ts"],
   "exclude": []
 }

@@ -185,25 +185,31 @@ unbash provides:
 ## Benchmarks
 
 Parse throughput in MB/s; higher is better. Median per-run p75 iteration times
-from 11 runs per unbash version and 22 per other parser, on Apple M1 Pro/32GB
-with Node.js 24.19.0. Parentheses show speed relative to unbash v5.
+from 11 isolated runs per parser and workload, on Apple M1 Pro/32GB with Node.js
+24.19.0. Parentheses show speed relative to unbash v5.
 
 | Parser                       | short (1.1KiB) | advanced (0.9KiB) | medium (150KiB) | large (970KiB) |
 | ---------------------------- | -------------: | ----------------: | --------------: | -------------: |
-| **unbash v5**                |       **77.3** |          **70.3** |       **101.5** |      **117.6** |
-| unbash v4                    |   79.2 (0.98x) |      71.3 (0.99x) |    97.9 (1.04x) |  116.0 (1.01x) |
-| tree-sitter-bash (native)    |     4.59 (17x) |        6.51 (11x) |      15.08 (7x) |    11.90 (10x) |
-| tree-sitter-bash (WASM)      |     5.02 (15x) |        5.61 (13x) |      8.85 (11x) |     8.27 (14x) |
-| sh-syntax                    |   0.03 (2290x) |      0.04 (1659x) |      8.28 (12x) |     14.06 (8x) |
-| bash-parser                  |    0.27 (290x) |               n/a |             n/a |            n/a |
-| @ericcornelissen/bash-parser |    0.26 (301x) |               n/a |             n/a |            n/a |
+| **unbash v6**                |       **79.2** |          **72.7** |       **102.6** |      **121.2** |
+| unbash v5                    |   79.5 (1.00x) |      73.3 (0.99x) |   103.6 (0.99x) |  116.6 (1.04x) |
+| unbash v4                    |   80.8 (0.98x) |      73.5 (0.99x) |    99.8 (1.03x) |  114.5 (1.06x) |
+| tree-sitter-bash (native)    |     4.23 (19x) |        5.95 (12x) |      15.04 (7x) |    11.88 (10x) |
+| tree-sitter-bash (WASM)      |     5.08 (16x) |        5.47 (13x) |      8.50 (12x) |     8.12 (15x) |
+| sh-syntax                    |   0.04 (1838x) |      0.06 (1264x) |      8.80 (12x) |     14.32 (8x) |
+| bash-parser                  |    0.28 (287x) |               n/a |             n/a |            n/a |
+| @ericcornelissen/bash-parser |    0.25 (313x) |               n/a |             n/a |            n/a |
 
-Run the benchmarks using Node.js 24+:
+Run the isolated suite using Node.js 24.2+:
 
 ```sh
 pnpm install
 pnpm bench
 ```
+
+Each run used 500ms of warmup, one V8 GC before timing, and at least one second
+and 64 iterations of measurement. Results consume top-level node counts; WASM
+tree-sitter timings include disposal of returned trees. Each case runs in a
+fresh process, with reversed order on repeats.
 
 ## Size
 
