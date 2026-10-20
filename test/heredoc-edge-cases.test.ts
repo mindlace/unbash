@@ -326,6 +326,15 @@ test("dollar-quoted heredoc delimiters use their decoded value", () => {
   }
 });
 
+test("UTF-8 byte escapes in heredoc delimiters match the decoded closing line", () => {
+  const ast = parse("cat <<$'\\xc3\\xa9'\nbody\né\necho after");
+  assert.equal(ast.errors, undefined);
+  const r = nodeOfType(redirectsOf(nodeOfType(ast.commands[0].command, "Command"))[0], "HereDoc");
+  assert.equal(r.delimiter?.value, "é");
+  assert.equal(r.body.text, "body\n");
+  assert.equal(nodeOfType(ast.commands[1].command, "Command").name?.value, "echo");
+});
+
 test("backslash-newline joins heredoc delimiter words", () => {
   for (const [src, quoted] of [
     ["cat <<E\\\nOF\nbody\nEOF", false],

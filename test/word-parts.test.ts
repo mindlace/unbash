@@ -197,6 +197,16 @@ test("ANSI-C byte escapes decode as UTF-8", () => {
   );
 });
 
+test("ANSI-C byte escapes keep byte order marks", () => {
+  const src = String.raw`echo $'\xef\xbb\xbf' $'1s/^\357\273\277//'`;
+  const c = getCmd(parse(src));
+
+  assert.deepEqual(
+    c.suffix.map((word) => nodeOfType(word, "Word").value),
+    ["\uFEFF", "1s/^\uFEFF//"],
+  );
+});
+
 test("ANSI-C byte escapes outside valid UTF-8 become U+FFFD", () => {
   const src = String.raw`echo $'\xc3' $'\xc3\x41' $'\xe9t\xc3\xa9' $'\xc0\xaf' $'\xed\xa0\x80' $'\xe2\x82'`;
   const c = getCmd(parse(src));

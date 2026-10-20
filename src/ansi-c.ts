@@ -14,7 +14,8 @@ function codePoint(value: number, fallback: string): string {
   }
 }
 
-const utf8 = new TextDecoder();
+// ignoreBOM keeps a leading EF BB BF as U+FEFF instead of stripping it from each run.
+const utf8 = new TextDecoder("utf-8", { ignoreBOM: true });
 
 // Bash writes \xHH and \NNN as raw bytes, so a run of them is decoded as UTF-8.
 // A byte outside a well-formed sequence has no character and becomes U+FFFD.
@@ -46,7 +47,8 @@ export function decodeAnsiCQuoted(source: string, start: number, limit: number) 
   while (pos < limit && source.charCodeAt(pos) !== 39) {
     const escapeStart = pos;
     const byte = readByteEscape(source, pos, limit);
-    if (byte) {
+    // ASCII bytes end a run like other text, so escapes such as \033 never pay for a decoder call.
+    if (byte && byte.value >= 0x80) {
       bytes.push(byte.value);
       pos = byte.end;
       continue;
@@ -54,6 +56,11 @@ export function decodeAnsiCQuoted(source: string, start: number, limit: number) 
     if (bytes.length > 0) {
       value += decodeBytes(bytes);
       bytes = [];
+    }
+    if (byte) {
+      value += String.fromCharCode(byte.value);
+      pos = byte.end;
+      continue;
     }
 
     if (source.charCodeAt(pos) !== 92 || pos + 1 >= limit) {
