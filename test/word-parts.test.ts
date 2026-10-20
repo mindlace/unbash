@@ -183,7 +183,27 @@ test("ANSI-C numeric and control escapes", () => {
   assert.equal(c.name!.value, "echo");
   assert.deepEqual(
     c.suffix.map((word) => nodeOfType(word, "Word").value),
-    ["abc", "\n3", "\xff", "\x01", "?", "\\q"],
+    ["abc", "\n3", "\uFFFD", "\x01", "?", "\\q"],
+  );
+});
+
+test("ANSI-C byte escapes decode as UTF-8", () => {
+  const src = String.raw`echo $'\xc3\xa9' $'\303\251' $'\xc3\251' $'\xe2\x82\xac' $'\xf0\x9f\x98\x80' $'a\xc3\xa9b' $'é\xc3\xa9'`;
+  const c = getCmd(parse(src));
+
+  assert.deepEqual(
+    c.suffix.map((word) => nodeOfType(word, "Word").value),
+    ["é", "é", "é", "€", "😀", "aéb", "éé"],
+  );
+});
+
+test("ANSI-C byte escapes outside valid UTF-8 become U+FFFD", () => {
+  const src = String.raw`echo $'\xc3' $'\xc3\x41' $'\xe9t\xc3\xa9' $'\xc0\xaf' $'\xed\xa0\x80' $'\xe2\x82'`;
+  const c = getCmd(parse(src));
+
+  assert.deepEqual(
+    c.suffix.map((word) => nodeOfType(word, "Word").value),
+    ["\uFFFD", "\uFFFDA", "\uFFFDté", "\uFFFD\uFFFD", "\uFFFD\uFFFD\uFFFD", "\uFFFD"],
   );
 });
 
